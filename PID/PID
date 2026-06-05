@@ -1,0 +1,1248 @@
+#include <Arduino.h>
+#include <Wire.h>
+#if defined(ESP8266)
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#elif defined(ESP32)
+#include <WiFi.h>
+#include <WebServer.h>
+#else
+#error "WiFi support requires ESP8266 or ESP32"
+#endif
+
+// ============================================================
+// WIFI SETTINGS
+// ============================================================
+
+const char* WIFI_SSID = "Mohamed_iphone";
+const char* WIFI_PASS = "iphonex1";
+
+IPAddress localIP(172, 20, 10, 3);
+IPAddress gateway(172, 20, 10, 1);
+IPAddress subnet(255, 255, 255, 240);
+
+WebServer server(80);
+
+// ============================================================
+// ROBOT GEOMETRY FROM DYNAMIC MODEL
+// ============================================================
+
+const float WHEEL_RADIUS_M = 0.0485f;
+const float LX_M = 0.395f / 2.0f;
+const float LY_M = 0.4545f / 2.0f;
+const float K_M = LX_M + LY_M;
+
+// ============================================================
+// PIN MAPPING - CURRENT CORRECTED MAPPING
+// ============================================================
+
+#define FR_PWM   18
+#define FR_DIR1  5
+#define FR_DIR2  17
+#define FR_ENC_A 34
+#define FR_ENC_B 35
+
+#define FL_PWM   19
+#define FL_DIR1  33
+#define FL_DIR2  32
+#define FL_ENC_A 39
+#define FL_ENC_B 36
+
+#define RR_PWM   4
+#define RR_DIR1  16
+#define RR_DIR2  2
+#define RR_ENC_A 26
+#define RR_ENC_B 25
+
+#define RL_PWM   13
+#define RL_DIR1  15
+#define RL_DIR2  23
+#define RL_ENC_A 14
+#define RL_ENC_B 27
+
+// ============================================================
+// BMI160 IMU SETTINGS
+// ============================================================
+
+#define I2C_SDA_PIN 21
+#define I2C_SCL_PIN 22
+
+#define BMI160_ADDR_1 0x68
+#define BMI160_ADDR_2 0x69
+
+#define BMI160_REG_CHIP_ID    0x00
+#define BMI160_REG_PMU_STATUS 0x03
+#define BMI160_REG_GYR_X_LSB  0x0C
+#define BMI160_REG_ACC_RANGE  0x41
+#define BMI160_REG_GYR_RANGE  0x43
+#define BMI160_REG_CMD        0x7E
+
+#define BMI160_CMD_ACC_NORMAL 0x11
+#define BMI160_CMD_GYR_NORMAL 0x15
+#define BMI160_CMD_SOFT_RESET 0xB6
+
+const float BMI160_GYRO_LSB_PER_DPS = 131.2f;
+
+uint8_t bmiAddr = BMI160_ADDR_1;
+bool imuOk = false;
+
+float gyroZRawDps = 0.0f;
+float gyroZBiasDps = 0.0f;
+float gyroZDps = 0.0f;
+float yawDeg = 0.0f;
+float YAW_SIGN = 1.0f;
+
+// ============================================================
+// INNER VELOCITY LOOP SETTINGS
+// ============================================================
+
+const float ENCODER_PPR = 4080.0f;
+
+const uint32_t PWM_FREQ_HZ = 20000;
+const uint8_t PWM_RESOLUTION = 8;
+const int PWM_ABS_LIMIT = 255;
+
+const uint32_t CONTROL_DT_MS = 20;
+const float CONTROL_DT_S = CONTROL_DT_MS / 1000.0f;
+const float FILTER_ALPHA = 0.25f;
+
+// ============================================================
+// OUTER POSE LOOP SETTINGS - TUNE FROM GUI
+// ============================================================
+
+bool poseMode = false;
+
+float poseX = 0.0f;
+float poseY = 0.0f;
+float poseYawTargetDeg = 0.0f;
+
+float targetX = 0.0f;
+float targetY = 0.0f;
+
+float posKpX = 1.00f;
+float posKiX = 0.00f;
+float posKdX = 0.00f;
+
+float posKpY = 1.00f;
+float posKiY = 0.30f;
+float posKdY = 0.00f;
+
+float yawKp = 4.00f;
+float yawKi = 0.10f;
+float yawKd = 0.00f;
+
+float posIntX = 0.0f;
+float posIntY = 0.0f;
+float yawInt = 0.0f;
+
+float posLastErrX = 0.0f;
+float posLastErrY = 0.0f;
+float yawLastErrRad = 0.0f;
+
+float posIntegralLimit = 0.30f;
+float yawIntegralLimit = 0.50f;
+
+float MAX_VX = 0.20f;
+float MAX_VY = 0.20f;
+float MAX_WZ = 0.80f;
+
+float ODOM_X_SCALE = 1.000f;
+float ODOM_Y_SCALE = 0.948f;
+
+float POS_TOL_M = 0.025f;
+float YAW_TOL_DEG = 2.0f;
+
+float cmdVx = 0.0f;
+float cmdVy = 0.0f;
+float cmdWz = 0.0f;
+
+// ============================================================
+// WHEEL STRUCT
+// ============================================================
+
+struct Wheel {
+  const char* name;
+
+  int pwmPin;
+  int dir1Pin;
+  int dir2Pin;
+  int encAPin;
+  int encBPin;
+
+  volatile long* encCount;
+  volatile uint8_t* lastState;
+
+  long lastCount;
+  long lastDelta;
+
+  float rawRadS;
+  float filtRadS;
+  float targetRadS;
+
+  float Kp;
+  float Ki;
+  float Kd;
+
+  int basePWM;
+  int maxPWM;
+
+  float integral;
+  float lastError;
+  float integralLimit;
+
+  int appliedPWM;
+};
+
+volatile long encFR = 0;
+volatile long encFL = 0;
+volatile long encRR = 0;
+volatile long encRL = 0;
+
+volatile uint8_t frLastState = 0;
+volatile uint8_t flLastState = 0;
+volatile uint8_t rrLastState = 0;
+volatile uint8_t rlLastState = 0;
+
+Wheel FR = {
+  "FR", FR_PWM, FR_DIR1, FR_DIR2, FR_ENC_A, FR_ENC_B,
+  &encFR, &frLastState,
+  0, 0, 0, 0, 0,
+  105.0f, 40.0f, 0.0f,
+  30, 150,
+  0, 0, 50,
+  0
+};
+
+Wheel FL = {
+  "FL", FL_PWM, FL_DIR1, FL_DIR2, FL_ENC_A, FL_ENC_B,
+  &encFL, &flLastState,
+  0, 0, 0, 0, 0,
+  100.0f, 50.0f, 0.0f,
+  30, 150,
+  0, 0, 50,
+  0
+};
+
+Wheel RR = {
+  "RR", RR_PWM, RR_DIR1, RR_DIR2, RR_ENC_A, RR_ENC_B,
+  &encRR, &rrLastState,
+  0, 0, 0, 0, 0,
+  100.0f, 40.0f, 0.0f,
+  30, 150,
+  0, 0, 50,
+  0
+};
+
+Wheel RL = {
+  "RL", RL_PWM, RL_DIR1, RL_DIR2, RL_ENC_A, RL_ENC_B,
+  &encRL, &rlLastState,
+  0, 0, 0, 0, 0,
+  100.0f, 20.0f, 0.0f,
+  30, 150,
+  0, 0, 50,
+  0
+};
+
+// ============================================================
+// UTILITY
+// ============================================================
+
+float wrapDeg(float a) {
+  while (a > 180.0f) a -= 360.0f;
+  while (a < -180.0f) a += 360.0f;
+  return a;
+}
+
+float degToRad(float d) {
+  return d * PI / 180.0f;
+}
+
+float radToDeg(float r) {
+  return r * 180.0f / PI;
+}
+
+void resetOuterPID() {
+  posIntX = 0.0f;
+  posIntY = 0.0f;
+  yawInt = 0.0f;
+  posLastErrX = 0.0f;
+  posLastErrY = 0.0f;
+  yawLastErrRad = 0.0f;
+}
+
+// ============================================================
+// BMI160 LOW LEVEL
+// ============================================================
+
+bool i2cWrite8(uint8_t addr, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+bool i2cReadBytes(uint8_t addr, uint8_t reg, uint8_t* data, uint8_t len) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  uint8_t received = Wire.requestFrom(addr, len);
+
+  if (received != len) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < len; i++) {
+    data[i] = Wire.read();
+  }
+
+  return true;
+}
+
+uint8_t i2cRead8(uint8_t addr, uint8_t reg) {
+  uint8_t value = 0xFF;
+  i2cReadBytes(addr, reg, &value, 1);
+  return value;
+}
+
+bool bmi160Detect() {
+  uint8_t id1 = i2cRead8(BMI160_ADDR_1, BMI160_REG_CHIP_ID);
+  uint8_t id2 = i2cRead8(BMI160_ADDR_2, BMI160_REG_CHIP_ID);
+
+  if (id1 == 0xD1) {
+    bmiAddr = BMI160_ADDR_1;
+    return true;
+  }
+
+  if (id2 == 0xD1) {
+    bmiAddr = BMI160_ADDR_2;
+    return true;
+  }
+
+  return false;
+}
+
+bool bmi160Init() {
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Wire.setClock(400000);
+  delay(100);
+
+  if (!bmi160Detect()) {
+    Serial.println("BMI160 not detected.");
+    return false;
+  }
+
+  Serial.print("BMI160 detected at 0x");
+  Serial.println(bmiAddr, HEX);
+
+  i2cWrite8(bmiAddr, BMI160_REG_CMD, BMI160_CMD_SOFT_RESET);
+  delay(100);
+
+  if (!bmi160Detect()) {
+    Serial.println("BMI160 disappeared after reset.");
+    return false;
+  }
+
+  i2cWrite8(bmiAddr, BMI160_REG_CMD, BMI160_CMD_ACC_NORMAL);
+  delay(50);
+  i2cWrite8(bmiAddr, BMI160_REG_CMD, BMI160_CMD_GYR_NORMAL);
+  delay(100);
+
+  i2cWrite8(bmiAddr, BMI160_REG_ACC_RANGE, 0x03);
+  delay(10);
+  i2cWrite8(bmiAddr, BMI160_REG_GYR_RANGE, 0x03);
+  delay(10);
+
+  Serial.print("BMI160 PMU_STATUS: 0x");
+  Serial.println(i2cRead8(bmiAddr, BMI160_REG_PMU_STATUS), HEX);
+
+  return true;
+}
+
+bool bmi160ReadGyro(float &gxDps, float &gyDps, float &gzDps) {
+  uint8_t data[6];
+
+  if (!i2cReadBytes(bmiAddr, BMI160_REG_GYR_X_LSB, data, 6)) {
+    return false;
+  }
+
+  int16_t rawX = (int16_t)((data[1] << 8) | data[0]);
+  int16_t rawY = (int16_t)((data[3] << 8) | data[2]);
+  int16_t rawZ = (int16_t)((data[5] << 8) | data[4]);
+
+  gxDps = (float)rawX / BMI160_GYRO_LSB_PER_DPS;
+  gyDps = (float)rawY / BMI160_GYRO_LSB_PER_DPS;
+  gzDps = (float)rawZ / BMI160_GYRO_LSB_PER_DPS;
+
+  return true;
+}
+
+void updateIMU() {
+  static uint32_t lastMicros = micros();
+
+  if (!imuOk) {
+    return;
+  }
+
+  float gx, gy, gz;
+
+  if (!bmi160ReadGyro(gx, gy, gz)) {
+    return;
+  }
+
+  uint32_t nowMicros = micros();
+  float dt = (nowMicros - lastMicros) / 1000000.0f;
+  lastMicros = nowMicros;
+
+  if (dt <= 0.0f || dt > 0.1f) {
+    return;
+  }
+
+  gyroZRawDps = gz;
+  gyroZDps = (gz - gyroZBiasDps) * YAW_SIGN;
+  yawDeg = wrapDeg(yawDeg + gyroZDps * dt);
+}
+
+void zeroPose() {
+  poseX = 0.0f;
+  poseY = 0.0f;
+  yawDeg = 0.0f;
+  targetX = 0.0f;
+  targetY = 0.0f;
+  poseYawTargetDeg = 0.0f;
+  resetOuterPID();
+}
+
+void calibrateIMU(uint16_t samples) {
+  Serial.println("IMU calibration: keep robot still.");
+
+  float sumZ = 0.0f;
+  uint16_t good = 0;
+
+  for (uint16_t i = 0; i < samples; i++) {
+    float gx, gy, gz;
+
+    if (bmi160ReadGyro(gx, gy, gz)) {
+      sumZ += gz;
+      good++;
+    }
+
+    delay(5);
+  }
+
+  if (good < samples / 2) {
+    Serial.println("IMU calibration failed.");
+    return;
+  }
+
+  gyroZBiasDps = sumZ / (float)good;
+  zeroPose();
+
+  Serial.print("IMU calibration done. gyroZBiasDps=");
+  Serial.println(gyroZBiasDps, 6);
+}
+
+// ============================================================
+// QUADRATURE DECODER
+// ============================================================
+
+void IRAM_ATTR updateQuadrature(int encAPin, int encBPin, volatile long* count, volatile uint8_t* lastState) {
+  uint8_t a = digitalRead(encAPin);
+  uint8_t b = digitalRead(encBPin);
+  uint8_t state = (a << 1) | b;
+  uint8_t transition = ((*lastState) << 2) | state;
+
+  if (transition == 0b0001 || transition == 0b0111 || transition == 0b1110 || transition == 0b1000) {
+    (*count)++;
+  } else if (transition == 0b0010 || transition == 0b1011 || transition == 0b1101 || transition == 0b0100) {
+    (*count)--;
+  }
+
+  *lastState = state;
+}
+
+void IRAM_ATTR isrFR() { updateQuadrature(FR_ENC_A, FR_ENC_B, &encFR, &frLastState); }
+void IRAM_ATTR isrFL() { updateQuadrature(FL_ENC_A, FL_ENC_B, &encFL, &flLastState); }
+void IRAM_ATTR isrRR() { updateQuadrature(RR_ENC_A, RR_ENC_B, &encRR, &rrLastState); }
+void IRAM_ATTR isrRL() { updateQuadrature(RL_ENC_A, RL_ENC_B, &encRL, &rlLastState); }
+
+// ============================================================
+// INNER MOTOR + VELOCITY PID
+// ============================================================
+
+void setWheelPWM(Wheel& w, int pwm) {
+  pwm = constrain(pwm, -PWM_ABS_LIMIT, PWM_ABS_LIMIT);
+  w.appliedPWM = pwm;
+
+  if (pwm > 0) {
+    digitalWrite(w.dir1Pin, HIGH);
+    digitalWrite(w.dir2Pin, LOW);
+    ledcWrite(w.pwmPin, pwm);
+  } else if (pwm < 0) {
+    digitalWrite(w.dir1Pin, LOW);
+    digitalWrite(w.dir2Pin, HIGH);
+    ledcWrite(w.pwmPin, -pwm);
+  } else {
+    digitalWrite(w.dir1Pin, LOW);
+    digitalWrite(w.dir2Pin, LOW);
+    ledcWrite(w.pwmPin, 0);
+  }
+}
+
+void resetWheelPID(Wheel& w) {
+  w.integral = 0.0f;
+  w.lastError = 0.0f;
+}
+
+void resetAllWheelPID() {
+  resetWheelPID(FL);
+  resetWheelPID(FR);
+  resetWheelPID(RL);
+  resetWheelPID(RR);
+}
+
+void setWheelTarget(Wheel& w, float target) {
+  w.targetRadS = target;
+}
+
+void stopAll() {
+  poseMode = false;
+  cmdVx = 0.0f;
+  cmdVy = 0.0f;
+  cmdWz = 0.0f;
+
+  setWheelTarget(FL, 0);
+  setWheelTarget(FR, 0);
+  setWheelTarget(RL, 0);
+  setWheelTarget(RR, 0);
+
+  resetAllWheelPID();
+
+  setWheelPWM(FL, 0);
+  setWheelPWM(FR, 0);
+  setWheelPWM(RL, 0);
+  setWheelPWM(RR, 0);
+}
+
+float countsToRadS(long deltaCounts) {
+  return ((float)deltaCounts / ENCODER_PPR) * 2.0f * PI / CONTROL_DT_S;
+}
+
+void updateWheelSpeed(Wheel& w) {
+  long countNow;
+
+  noInterrupts();
+  countNow = *(w.encCount);
+  interrupts();
+
+  long delta = countNow - w.lastCount;
+
+  w.lastCount = countNow;
+  w.lastDelta = delta;
+
+  w.rawRadS = countsToRadS(delta);
+  w.filtRadS = FILTER_ALPHA * w.rawRadS + (1.0f - FILTER_ALPHA) * w.filtRadS;
+}
+
+void updateWheelPID(Wheel& w) {
+  if (abs(w.targetRadS) < 0.01f) {
+    resetWheelPID(w);
+    setWheelPWM(w, 0);
+    return;
+  }
+
+  float error = w.targetRadS - w.filtRadS;
+
+  w.integral += error * CONTROL_DT_S;
+  w.integral = constrain(w.integral, -w.integralLimit, w.integralLimit);
+
+  float derivative = (error - w.lastError) / CONTROL_DT_S;
+  w.lastError = error;
+
+  float pidOutput = (w.Kp * error) + (w.Ki * w.integral) + (w.Kd * derivative);
+
+  int feedforward = 0;
+
+  if (w.targetRadS > 0) feedforward = w.basePWM;
+  else if (w.targetRadS < 0) feedforward = -w.basePWM;
+
+  int pwmCommand = feedforward + (int)pidOutput;
+  pwmCommand = constrain(pwmCommand, -w.maxPWM, w.maxPWM);
+
+  setWheelPWM(w, pwmCommand);
+}
+
+void setBodyVelocityTargets(float vx, float vy, float wz) {
+  cmdVx = vx;
+  cmdVy = vy;
+  cmdWz = wz;
+
+  float wFL = (vx - vy - K_M * wz) / WHEEL_RADIUS_M;
+  float wFR = (vx + vy + K_M * wz) / WHEEL_RADIUS_M;
+  float wRL = (vx + vy - K_M * wz) / WHEEL_RADIUS_M;
+  float wRR = (vx - vy + K_M * wz) / WHEEL_RADIUS_M;
+
+  setWheelTarget(FL, wFL);
+  setWheelTarget(FR, wFR);
+  setWheelTarget(RL, wRL);
+  setWheelTarget(RR, wRR);
+}
+
+// ============================================================
+// ODOMETRY + OUTER POSE LOOP
+// ============================================================
+
+void updateOdometryFromWheels() {
+  float wFL = FL.filtRadS;
+  float wFR = FR.filtRadS;
+  float wRL = RL.filtRadS;
+  float wRR = RR.filtRadS;
+
+  float vxBody = (WHEEL_RADIUS_M / 4.0f) * (wFL + wFR + wRL + wRR);
+  float vyBody = (WHEEL_RADIUS_M / 4.0f) * (-wFL + wFR + wRL - wRR);
+
+  vxBody *= ODOM_X_SCALE;
+  vyBody *= ODOM_Y_SCALE;
+
+  float yawRad = degToRad(yawDeg);
+  float c = cosf(yawRad);
+  float s = sinf(yawRad);
+
+  float vxWorld = vxBody * c - vyBody * s;
+  float vyWorld = vxBody * s + vyBody * c;
+
+  poseX += vxWorld * CONTROL_DT_S;
+  poseY += vyWorld * CONTROL_DT_S;
+}
+
+float updatePIDTerm(float error, float &integral, float &lastError, float kp, float ki, float kd, float iLimit) {
+  integral += error * CONTROL_DT_S;
+  integral = constrain(integral, -iLimit, iLimit);
+
+  float derivative = (error - lastError) / CONTROL_DT_S;
+  lastError = error;
+
+  return (kp * error) + (ki * integral) + (kd * derivative);
+}
+
+void updatePoseLoop() {
+  if (!poseMode) {
+    return;
+  }
+
+  float errXWorld = targetX - poseX;
+  float errYWorld = targetY - poseY;
+
+  float yawRad = degToRad(yawDeg);
+  float c = cosf(yawRad);
+  float s = sinf(yawRad);
+
+  float errXBody = c * errXWorld + s * errYWorld;
+  float errYBody = -s * errXWorld + c * errYWorld;
+
+  float yawErrDeg = wrapDeg(poseYawTargetDeg - yawDeg);
+  float yawErrRad = degToRad(yawErrDeg);
+
+  bool posDone = hypotf(errXWorld, errYWorld) < POS_TOL_M;
+  bool yawDone = fabsf(yawErrDeg) < YAW_TOL_DEG;
+
+  if (posDone && yawDone) {
+    poseMode = false;
+    resetOuterPID();
+    setBodyVelocityTargets(0, 0, 0);
+    return;
+  }
+
+  float vxCmd = updatePIDTerm(errXBody, posIntX, posLastErrX, posKpX, posKiX, posKdX, posIntegralLimit);
+  float vyCmd = updatePIDTerm(errYBody, posIntY, posLastErrY, posKpY, posKiY, posKdY, posIntegralLimit);
+  float wzCmd = updatePIDTerm(yawErrRad, yawInt, yawLastErrRad, yawKp, yawKi, yawKd, yawIntegralLimit);
+
+  vxCmd = constrain(vxCmd, -MAX_VX, MAX_VX);
+  vyCmd = constrain(vyCmd, -MAX_VY, MAX_VY);
+  wzCmd = constrain(wzCmd, -MAX_WZ, MAX_WZ);
+
+  setBodyVelocityTargets(vxCmd, vyCmd, wzCmd);
+}
+
+void updateAllControl() {
+  updateWheelSpeed(FL);
+  updateWheelSpeed(FR);
+  updateWheelSpeed(RL);
+  updateWheelSpeed(RR);
+
+  updateOdometryFromWheels();
+  updatePoseLoop();
+
+  updateWheelPID(FL);
+  updateWheelPID(FR);
+  updateWheelPID(RL);
+  updateWheelPID(RR);
+}
+
+void startPoseMove(float x, float y, float yawTargetDeg) {
+  targetX = x;
+  targetY = y;
+  poseYawTargetDeg = wrapDeg(yawTargetDeg);
+  poseMode = true;
+  resetOuterPID();
+}
+
+// ============================================================
+// PARAMETER HELPERS
+// ============================================================
+
+Wheel* getWheelByName(String name) {
+  name.toUpperCase();
+
+  if (name == "FR") return &FR;
+  if (name == "FL") return &FL;
+  if (name == "RR") return &RR;
+  if (name == "RL") return &RL;
+
+  return nullptr;
+}
+
+bool setWheelParam(Wheel& w, String param, float value) {
+  param.toLowerCase();
+
+  if (param == "kp") w.Kp = value;
+  else if (param == "ki") w.Ki = value;
+  else if (param == "kd") w.Kd = value;
+  else if (param == "base") w.basePWM = constrain((int)value, 0, PWM_ABS_LIMIT);
+  else if (param == "max") w.maxPWM = constrain((int)value, 0, PWM_ABS_LIMIT);
+  else if (param == "ilim") w.integralLimit = value;
+  else return false;
+
+  resetWheelPID(w);
+  return true;
+}
+
+bool setOuterParam(String param, float value) {
+  param.toLowerCase();
+
+  if (param == "kpx") posKpX = value;
+  else if (param == "kix") posKiX = value;
+  else if (param == "kdx") posKdX = value;
+  else if (param == "kpy") posKpY = value;
+  else if (param == "kiy") posKiY = value;
+  else if (param == "kdy") posKdY = value;
+  else if (param == "yawkp") yawKp = value;
+  else if (param == "yawki") yawKi = value;
+  else if (param == "yawkd") yawKd = value;
+  else if (param == "maxvx") MAX_VX = constrain(value, 0.01f, 1.0f);
+  else if (param == "maxvy") MAX_VY = constrain(value, 0.01f, 1.0f);
+  else if (param == "maxwz") MAX_WZ = constrain(value, 0.05f, 3.0f);
+  else if (param == "odomx") ODOM_X_SCALE = constrain(value, 0.50f, 1.50f);
+  else if (param == "odomy") ODOM_Y_SCALE = constrain(value, 0.50f, 1.50f);
+  else if (param == "postol") POS_TOL_M = constrain(value, 0.001f, 0.25f);
+  else if (param == "yawtol") YAW_TOL_DEG = constrain(value, 0.2f, 20.0f);
+  else if (param == "posilim") posIntegralLimit = constrain(value, 0.0f, 5.0f);
+  else if (param == "yawilim") yawIntegralLimit = constrain(value, 0.0f, 5.0f);
+  else if (param == "yawsign") YAW_SIGN = (value < 0.0f) ? -1.0f : 1.0f;
+  else return false;
+
+  resetOuterPID();
+  return true;
+}
+
+// ============================================================
+// GUI PAGE
+// ============================================================
+
+const char MAIN_page[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mecanum Pose PID</title>
+  <style>
+    body{margin:0;font-family:Arial,sans-serif;background:#111;color:#eee}
+    header{padding:14px 18px;background:#1e1e1e;font-size:20px;font-weight:bold}
+    .wrap{padding:14px;display:grid;gap:14px}
+    .panel{background:#1b1b1b;border:1px solid #333;border-radius:8px;padding:12px}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(280px,1fr));gap:14px}
+    .controls{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:640px}
+    button{padding:12px;border:0;border-radius:7px;font-size:15px;font-weight:bold;background:#2e6be6;color:white;cursor:pointer}
+    .stop{background:#d7263d;grid-column:span 3;font-size:22px;padding:18px}
+    .apply{background:#16a34a}.secondary{background:#444}
+    input{padding:8px;border-radius:6px;border:1px solid #555;background:#0f0f0f;color:white;font-size:14px;width:84px}
+    .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    td,th{border-bottom:1px solid #333;padding:8px;text-align:right}
+    td:first-child,th:first-child{text-align:left}
+    canvas{width:100%;height:170px;background:#080808;border:1px solid #333;border-radius:6px}
+    .big{font-size:20px;color:#93c5fd;font-weight:bold}.hint{color:#aaa;font-size:13px}.status{color:#22c55e;font-size:13px}
+    @media(max-width:760px){.grid{grid-template-columns:1fr}.controls{grid-template-columns:repeat(2,1fr)}.stop{grid-column:span 2}table{font-size:12px}input{width:64px}}
+  </style>
+</head>
+<body>
+<header>Mecanum Pose PID - Cascaded Control</header>
+<div class="wrap">
+  <div class="panel">
+    <b>Status</b>
+    <div class="row">
+      <span>Mode: <span class="big" id="mode">--</span></span>
+      <span>X: <span class="big" id="x">--</span></span>
+      <span>Y: <span class="big" id="y">--</span></span>
+      <span>Yaw: <span class="big" id="yaw">--</span></span>
+      <span>IMU: <span class="big" id="imu">--</span></span>
+    </div>
+    <div class="row">
+      <span>Target X: <span id="tx">--</span></span>
+      <span>Target Y: <span id="ty">--</span></span>
+      <span>Target Yaw: <span id="tyaw">--</span></span>
+      <span>cmd vx: <span id="cvx">--</span></span>
+      <span>cmd vy: <span id="cvy">--</span></span>
+      <span>cmd wz: <span id="cwz">--</span></span>
+      <span>Odom X scale: <span id="odomx">--</span></span>
+      <span>Odom Y scale: <span id="odomy">--</span></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <b>Pose Command</b>
+    <div class="row">
+      <label>X m</label><input id="targetX" type="number" value="0.20" step="0.01">
+      <label>Y m</label><input id="targetY" type="number" value="0.00" step="0.01">
+      <label>Yaw deg</label><input id="targetYaw" type="number" value="0" step="1">
+      <button class="apply" onclick="goPose()">Go To Pose</button>
+      <button class="secondary" onclick="zeroPose()">Zero Pose</button>
+      <button class="secondary" onclick="imuCal()">IMU Cal</button>
+    </div>
+    <div class="controls">
+      <button onclick="manual('fwd')">Forward</button>
+      <button onclick="manual('cw')">CW</button>
+      <button onclick="manual('right')">Right</button>
+      <button onclick="manual('left')">Left</button>
+      <button onclick="manual('ccw')">CCW</button>
+      <button onclick="manual('back')">Backward</button>
+      <button class="stop" onclick="stopRobot()">STOP</button>
+    </div>
+    <div class="row">
+      <label>Manual speed rad/s</label><input id="manualSpeed" type="number" value="3.0" step="0.1">
+      <span class="hint">Use Go To Pose for outer-loop tuning. Manual buttons bypass pose mode.</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <b>Outer Loop Tuning</b>
+      <button class="apply" onclick="applyOuter()">Apply Outer</button>
+      <button onclick="loadOuter()">Reload</button>
+      <span id="outerStatus" class="status"></span>
+    </div>
+    <table>
+      <tbody id="outerBody"></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <b>Wheel Data</b>
+    <table>
+      <thead><tr><th>Wheel</th><th>Target</th><th>Actual</th><th>Error</th><th>Raw</th><th>D</th><th>PWM</th></tr></thead>
+      <tbody id="wheelBody"></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <b>Inner Wheel Tuning</b>
+      <button class="apply" onclick="applyWheelParams()">Apply Wheels</button>
+      <button onclick="loadWheelParams()">Reload</button>
+      <span id="wheelStatus" class="status"></span>
+    </div>
+    <table>
+      <thead><tr><th>Wheel</th><th>Kp</th><th>Ki</th><th>Kd</th><th>Base</th><th>Max</th><th>I Lim</th></tr></thead>
+      <tbody id="paramsBody"></tbody>
+    </table>
+  </div>
+
+  <div class="grid">
+    <div class="panel"><b>X Response</b><canvas id="plotX"></canvas></div>
+    <div class="panel"><b>Y Response</b><canvas id="plotY"></canvas></div>
+    <div class="panel"><b>Yaw Response</b><canvas id="plotYaw"></canvas></div>
+    <div class="panel"><b>Wheel Speeds</b><canvas id="plotWheel"></canvas></div>
+  </div>
+</div>
+
+<script>
+const wheels=["FL","FR","RL","RR"];
+const wheelParams=["kp","ki","kd","base","max","ilim"];
+const outerParams=[
+  ["kpx","Kp X"],["kix","Ki X"],["kdx","Kd X"],
+  ["kpy","Kp Y"],["kiy","Ki Y"],["kdy","Kd Y"],
+  ["yawkp","Yaw Kp"],["yawki","Yaw Ki"],["yawkd","Yaw Kd"],
+  ["maxvx","Max vx"],["maxvy","Max vy"],["maxwz","Max wz"],
+  ["odomx","Odom X scale"],["odomy","Odom Y scale"],
+  ["postol","Pos tol"],["yawtol","Yaw tol"],
+  ["posilim","Pos I lim"],["yawilim","Yaw I lim"],["yawsign","Yaw sign"]
+];
+const hist={x:[],tx:[],y:[],ty:[],yaw:[],tyaw:[],fl:[],fr:[],rl:[],rr:[]};
+const maxPoints=150;
+function val(id){return parseFloat(document.getElementById(id).value||"0")}
+function push(a,v){a.push(v);if(a.length>maxPoints)a.shift()}
+function goPose(){fetch(`/pose?x=${val("targetX")}&y=${val("targetY")}&yaw=${val("targetYaw")}`)}
+function zeroPose(){fetch("/zeroPose")}
+function imuCal(){fetch("/imucal")}
+function stopRobot(){fetch("/stop")}
+function manual(c){fetch(`/move?cmd=${c}&s=${val("manualSpeed")}`)}
+function draw(id, series){
+  const c=document.getElementById(id),ctx=c.getContext("2d"),dpr=window.devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
+  if(c.width!==w*dpr||c.height!==h*dpr){c.width=w*dpr;c.height=h*dpr}
+  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);ctx.strokeStyle="#333";ctx.lineWidth=1;
+  for(let i=0;i<5;i++){let y=h*i/4;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke()}
+  let vals=[];series.forEach(s=>vals=vals.concat(s.data));let m=Math.max(0.1,...vals.map(v=>Math.abs(v)));
+  series.forEach(s=>{ctx.strokeStyle=s.color;ctx.lineWidth=2;ctx.beginPath();s.data.forEach((v,i)=>{let x=i*w/(maxPoints-1),y=h/2-(v/m)*(h*0.42);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)});ctx.stroke()});
+}
+async function poll(){
+  try{
+    const r=await fetch("/data");const d=await r.json();
+    document.getElementById("mode").textContent=d.poseMode?"POSE":"MANUAL";
+    document.getElementById("x").textContent=d.pose.x.toFixed(3);
+    document.getElementById("y").textContent=d.pose.y.toFixed(3);
+    document.getElementById("yaw").textContent=d.pose.yaw.toFixed(1);
+    document.getElementById("imu").textContent=d.imu?"OK":"NO";
+    document.getElementById("tx").textContent=d.target.x.toFixed(3);
+    document.getElementById("ty").textContent=d.target.y.toFixed(3);
+    document.getElementById("tyaw").textContent=d.target.yaw.toFixed(1);
+    document.getElementById("cvx").textContent=d.cmd.vx.toFixed(3);
+    document.getElementById("cvy").textContent=d.cmd.vy.toFixed(3);
+    document.getElementById("cwz").textContent=d.cmd.wz.toFixed(3);
+    document.getElementById("odomx").textContent=d.odom.x.toFixed(3);
+    document.getElementById("odomy").textContent=d.odom.y.toFixed(3);
+    push(hist.x,d.pose.x);push(hist.tx,d.target.x);push(hist.y,d.pose.y);push(hist.ty,d.target.y);push(hist.yaw,d.pose.yaw/90);push(hist.tyaw,d.target.yaw/90);
+    let html="";
+    for(const w of wheels){const q=d.wheels[w];html+=`<tr><td>${w}</td><td>${q.t.toFixed(2)}</td><td>${q.a.toFixed(2)}</td><td>${(q.t-q.a).toFixed(2)}</td><td>${q.raw.toFixed(2)}</td><td>${q.d}</td><td>${q.pwm}</td></tr>`}
+    document.getElementById("wheelBody").innerHTML=html;
+    push(hist.fl,d.wheels.FL.a);push(hist.fr,d.wheels.FR.a);push(hist.rl,d.wheels.RL.a);push(hist.rr,d.wheels.RR.a);
+    draw("plotX",[{data:hist.tx,color:"#ffcc00"},{data:hist.x,color:"#22c55e"}]);
+    draw("plotY",[{data:hist.ty,color:"#ffcc00"},{data:hist.y,color:"#22c55e"}]);
+    draw("plotYaw",[{data:hist.tyaw,color:"#ffcc00"},{data:hist.yaw,color:"#22c55e"}]);
+    draw("plotWheel",[{data:hist.fl,color:"#22c55e"},{data:hist.fr,color:"#38bdf8"},{data:hist.rl,color:"#f97316"},{data:hist.rr,color:"#e879f9"}]);
+  }catch(e){}
+  setTimeout(poll,100);
+}
+function makeWheelTable(data){
+  let html="";
+  for(const w of wheels){html+=`<tr><td>${w}</td>`;for(const p of wheelParams){html+=`<td><input id="${w}_${p}" type="number" step="0.01" value="${data[w][p]}"></td>`}html+="</tr>"}
+  document.getElementById("paramsBody").innerHTML=html;
+}
+async function loadWheelParams(){try{const r=await fetch("/params");makeWheelTable(await r.json());document.getElementById("wheelStatus").textContent="Loaded"}catch(e){}}
+async function applyWheelParams(){document.getElementById("wheelStatus").textContent="Applying...";for(const w of wheels){for(const p of wheelParams){await fetch(`/setParam?wheel=${w}&param=${p}&value=${document.getElementById(`${w}_${p}`).value}`)}}document.getElementById("wheelStatus").textContent="Applied"}
+function makeOuterTable(data){
+  let html="";
+  for(let i=0;i<outerParams.length;i+=3){html+="<tr>";for(let j=0;j<3;j++){const item=outerParams[i+j];if(item){html+=`<td>${item[1]}</td><td><input id="outer_${item[0]}" type="number" step="0.001" value="${data[item[0]]}"></td>`}}html+="</tr>"}
+  document.getElementById("outerBody").innerHTML=html;
+}
+async function loadOuter(){try{const r=await fetch("/outer");makeOuterTable(await r.json());document.getElementById("outerStatus").textContent="Loaded"}catch(e){}}
+async function applyOuter(){document.getElementById("outerStatus").textContent="Applying...";for(const p of outerParams){await fetch(`/setOuter?param=${p[0]}&value=${document.getElementById(`outer_${p[0]}`).value}`)}document.getElementById("outerStatus").textContent="Applied"}
+loadWheelParams();loadOuter();poll();
+</script>
+</body>
+</html>
+)rawliteral";
+
+// ============================================================
+// JSON HELPERS + ROUTES
+// ============================================================
+
+void sendWheelJsonPart(const Wheel& w, String& json) {
+  json += "\"";
+  json += w.name;
+  json += "\":{";
+  json += "\"t\":" + String(w.targetRadS, 3);
+  json += ",\"a\":" + String(w.filtRadS, 3);
+  json += ",\"raw\":" + String(w.rawRadS, 3);
+  json += ",\"d\":" + String(w.lastDelta);
+  json += ",\"pwm\":" + String(w.appliedPWM);
+  json += "}";
+}
+
+void handleData() {
+  String json = "{";
+  json += "\"poseMode\":" + String(poseMode ? "true" : "false") + ",";
+  json += "\"imu\":" + String(imuOk ? "true" : "false") + ",";
+  json += "\"pose\":{\"x\":" + String(poseX, 4) + ",\"y\":" + String(poseY, 4) + ",\"yaw\":" + String(yawDeg, 3) + "},";
+  json += "\"target\":{\"x\":" + String(targetX, 4) + ",\"y\":" + String(targetY, 4) + ",\"yaw\":" + String(poseYawTargetDeg, 3) + "},";
+  json += "\"cmd\":{\"vx\":" + String(cmdVx, 4) + ",\"vy\":" + String(cmdVy, 4) + ",\"wz\":" + String(cmdWz, 4) + "},";
+  json += "\"odom\":{\"x\":" + String(ODOM_X_SCALE, 4) + ",\"y\":" + String(ODOM_Y_SCALE, 4) + "},";
+  json += "\"wheels\":{";
+  sendWheelJsonPart(FL, json); json += ",";
+  sendWheelJsonPart(FR, json); json += ",";
+  sendWheelJsonPart(RL, json); json += ",";
+  sendWheelJsonPart(RR, json);
+  json += "}}";
+
+  server.send(200, "application/json", json);
+}
+
+void sendParamJsonPart(const Wheel& w, String& json) {
+  json += "\"";
+  json += w.name;
+  json += "\":{";
+  json += "\"kp\":" + String(w.Kp, 3);
+  json += ",\"ki\":" + String(w.Ki, 3);
+  json += ",\"kd\":" + String(w.Kd, 3);
+  json += ",\"base\":" + String(w.basePWM);
+  json += ",\"max\":" + String(w.maxPWM);
+  json += ",\"ilim\":" + String(w.integralLimit, 3);
+  json += "}";
+}
+
+void handleParams() {
+  String json = "{";
+  sendParamJsonPart(FL, json); json += ",";
+  sendParamJsonPart(FR, json); json += ",";
+  sendParamJsonPart(RL, json); json += ",";
+  sendParamJsonPart(RR, json);
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+void handleOuter() {
+  String json = "{";
+  json += "\"kpx\":" + String(posKpX, 4);
+  json += ",\"kix\":" + String(posKiX, 4);
+  json += ",\"kdx\":" + String(posKdX, 4);
+  json += ",\"kpy\":" + String(posKpY, 4);
+  json += ",\"kiy\":" + String(posKiY, 4);
+  json += ",\"kdy\":" + String(posKdY, 4);
+  json += ",\"yawkp\":" + String(yawKp, 4);
+  json += ",\"yawki\":" + String(yawKi, 4);
+  json += ",\"yawkd\":" + String(yawKd, 4);
+  json += ",\"maxvx\":" + String(MAX_VX, 4);
+  json += ",\"maxvy\":" + String(MAX_VY, 4);
+  json += ",\"maxwz\":" + String(MAX_WZ, 4);
+  json += ",\"odomx\":" + String(ODOM_X_SCALE, 4);
+  json += ",\"odomy\":" + String(ODOM_Y_SCALE, 4);
+  json += ",\"postol\":" + String(POS_TOL_M, 4);
+  json += ",\"yawtol\":" + String(YAW_TOL_DEG, 4);
+  json += ",\"posilim\":" + String(posIntegralLimit, 4);
+  json += ",\"yawilim\":" + String(yawIntegralLimit, 4);
+  json += ",\"yawsign\":" + String(YAW_SIGN, 1);
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+void handleSetParam() {
+  Wheel* w = getWheelByName(server.arg("wheel"));
+
+  if (w == nullptr) {
+    server.send(400, "text/plain", "Unknown wheel");
+    return;
+  }
+
+  if (!setWheelParam(*w, server.arg("param"), server.arg("value").toFloat())) {
+    server.send(400, "text/plain", "Unknown parameter");
+    return;
+  }
+
+  server.send(200, "text/plain", "OK");
+}
+
+void handleSetOuter() {
+  if (!setOuterParam(server.arg("param"), server.arg("value").toFloat())) {
+    server.send(400, "text/plain", "Unknown outer parameter");
+    return;
+  }
+
+  server.send(200, "text/plain", "OK");
+}
+
+void handlePose() {
+  float x = server.arg("x").toFloat();
+  float y = server.arg("y").toFloat();
+  float yaw = server.arg("yaw").toFloat();
+
+  x = constrain(x, -5.0f, 5.0f);
+  y = constrain(y, -5.0f, 5.0f);
+  yaw = constrain(yaw, -180.0f, 180.0f);
+
+  startPoseMove(x, y, yaw);
+  server.send(200, "text/plain", "POSE");
+}
+
+void handleMove() {
+  poseMode = false;
+  resetOuterPID();
+
+  String cmd = server.arg("cmd");
+  float s = fabsf(server.arg("s").toFloat());
+  s = constrain(s, 0.0f, 12.0f);
+
+  if (cmd == "fwd") {
+    setWheelTarget(FL, +s); setWheelTarget(FR, +s); setWheelTarget(RL, +s); setWheelTarget(RR, +s);
+  } else if (cmd == "back") {
+    setWheelTarget(FL, -s); setWheelTarget(FR, -s); setWheelTarget(RL, -s); setWheelTarget(RR, -s);
+  } else if (cmd == "right") {
+    setWheelTarget(FL, +s); setWheelTarget(FR, -s); setWheelTarget(RL, -s); setWheelTarget(RR, +s);
+  } else if (cmd == "left") {
+    setWheelTarget(FL, -s); setWheelTarget(FR, +s); setWheelTarget(RL, +s); setWheelTarget(RR, -s);
+  } else if (cmd == "cw") {
+    setWheelTarget(FL, +s); setWheelTarget(FR, -s); setWheelTarget(RL, +s); setWheelTarget(RR, -s);
+  } else if (cmd == "ccw") {
+    setWheelTarget(FL, -s); setWheelTarget(FR, +s); setWheelTarget(RL, -s); setWheelTarget(RR, +s);
+  }
+
+  server.send(200, "text/plain", "OK");
+}
+
+void handleStop() {
+  stopAll();
+  server.send(200, "text/plain", "STOP");
+}
+
+void handleZeroPose() {
+  stopAll();
+  zeroPose();
+  server.send(200, "text/plain", "ZERO");
+}
+
+void handleImuCal() {
+  stopAll();
+  calibrateIMU(1200);
+  server.send(200, "text/plain", "IMU CAL");
+}
+
+// ============================================================
+// SETUP HELPERS
+// ============================================================
+
+void setupWheelPins(const Wheel& w) {
+  pinMode(w.dir1Pin, OUTPUT);
+  pinMode(w.dir2Pin, OUTPUT);
+
+  digitalWrite(w.dir1Pin, LOW);
+  digitalWrite(w.dir2Pin, LOW);
+
+  pinMode(w.encAPin, INPUT);
+  pinMode(w.encBPin, INPUT);
+
+  bool pwmOk = ledcAttach(w.pwmPin, PWM_FREQ_HZ, PWM_RESOLUTION);
+
+  if (!pwmOk) {
+    Serial.print("ERROR: ledcAttach failed for ");
+    Serial.println(w.name);
+
+    while (true) delay(1000);
+  }
+
+  ledcWrite(w.pwmPin, 0);
+}
+
+void initEncoderState(Wheel& w) {
+  *(w.lastState) = (digitalRead(w.encAPin) << 1) | digitalRead(w.encBPin);
+}
+
+void setupWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.config(localIP, gateway, subnet);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  Serial.print("Connecting to WiFi");
+
+  uint32_t startTime = millis();
+
+  while (WiFi.status() != WL_CONNECTED && millis() - startTime < 20000) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("Connected. Open: http://");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("WiFi failed. Starting backup AP DeliveryRobot_AP / 12345678");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("DeliveryRobot_AP", "12345678");
+    Serial.print("Open: http://");
+    Serial.println(WiFi.softAPIP());
+  }
+}
+
+// ============================================================
+// SETUP + LOOP
+// ============================================================
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println();
+  Serial.println("Mecanum Pose Cascaded PID GUI");
+
+  setupWheelPins(FL);
+  setupWheelPins(FR);
+  setupWheelPins(RL);
+  setupWheelPins(RR);
+
+  initEncoderState(FL);
+  initEncoderState(FR);
+  initEncoderState(RL);
+  initEncoderState(RR);
+
+  attachInterrupt(digitalPinToInterrupt(FR_ENC_A), isrFR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(FR_ENC_B), isrFR, CHANGE);
+
+  attachInterrupt(digitalPinToInterrupt(FL_ENC_A), isrFL, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(FL_ENC_B), isrFL, CHANGE);
+
+  attachInterrupt(digitalPinToInterrupt(RR_ENC_A), isrRR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RR_ENC_B), isrRR, CHANGE);
+
+  attachInterrupt(digitalPinToInterrupt(RL_ENC_A), isrRL, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RL_ENC_B), isrRL, CHANGE);
+
+  stopAll();
+
+  imuOk = bmi160Init();
+
+  if (imuOk) {
+    Serial.println("BMI160 initialized. Run IMU Cal from GUI before testing.");
+  } else {
+    Serial.println("IMU failed. Yaw will not be reliable.");
+  }
+
+  setupWiFi();
+
+  server.on("/", []() { server.send_P(200, "text/html", MAIN_page); });
+  server.on("/data", handleData);
+  server.on("/params", handleParams);
+  server.on("/outer", handleOuter);
+  server.on("/setParam", handleSetParam);
+  server.on("/setOuter", handleSetOuter);
+  server.on("/pose", handlePose);
+  server.on("/move", handleMove);
+  server.on("/stop", handleStop);
+  server.on("/zeroPose", handleZeroPose);
+  server.on("/imucal", handleImuCal);
+
+  server.begin();
+  Serial.println("Web server started.");
+}
+
+void loop() {
+  static uint32_t lastControl = 0;
+  static uint32_t lastImu = 0;
+
+  server.handleClient();
+
+  uint32_t now = millis();
+
+  if (now - lastImu >= 10) {
+    lastImu = now;
+    updateIMU();
+  }
+
+  if (now - lastControl >= CONTROL_DT_MS) {
+    lastControl = now;
+    updateAllControl();
+  }
+}
