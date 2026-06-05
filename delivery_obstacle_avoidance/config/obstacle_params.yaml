@@ -1,0 +1,43 @@
+ultrasonic_scan_node:
+  ros__parameters:
+    gpio_chip: 4
+    trigger_pin: 17
+    echo_left_pin: 27
+    echo_right_pin: 22
+    echo_front_pin: 23
+    echo_back_pin: 24
+    front_servo_pin: 13
+    back_servo_pin: 18
+    servo_center_us: 1500
+    servo_plus_45_us: 1750
+    servo_minus_45_us: 1250
+    scan_period_s: 0.80
+    servo_settle_s: 0.30
+    servo_step_us: 10
+    enable_servo_scan: false
+    print_readings: true
+    print_period_s: 0.50
+    echo_timeout_s: 0.04
+    filter_window: 5
+
+obstacle_decision_node:
+  ros__parameters:
+    dead_zone_cm: 3.0
+    emergency_stop_cm: 20.0
+    front_blocked_cm: 30.0
+    front_clear_cm: 40.0
+    side_clear_cm: 75.0
+    side_emergency_cm: 15.0
+    static_wait_s: 10.0
+    side_offset_m: 0.70
+    pass_distance_m: 0.90
+    pose_tolerance_m: 0.06
+    yaw_tolerance_deg: 6.0
+    decision_period_s: 0.10
+    resume_saved_target: true
+
+esp_http_bridge_node:
+  ros__parameters:
+    esp_base_url: "http://172.20.10.3"
+    poll_period_s: 0.10
+    http_timeout_s: 0.35
