@@ -14,12 +14,12 @@
 // WIFI SETTINGS
 // ============================================================
 
-const char* WIFI_SSID = "Mohamed_iphone";
-const char* WIFI_PASS = "iphonex1";
+const char* WIFI_SSID = "TP-Link_63F5";
+const char* WIFI_PASS = "22294098";
 
-IPAddress localIP(172, 20, 10, 3);
-IPAddress gateway(172, 20, 10, 1);
-IPAddress subnet(255, 255, 255, 240);
+IPAddress localIP(192, 168, 1, 112);
+IPAddress gateway(192, 168, 1, 1);
+IPAddress subnet(255, 255, 255, 0);
 
 WebServer server(80);
 
