@@ -23,6 +23,29 @@ IPAddress subnet(255, 255, 255, 0);
 
 WebServer server(80);
 
+const uint32_t ROS_OWNER_TIMEOUT_MS = 3000;
+const char* ROS_CONTROL_TOKEN = "obstacle_supervisor_v2";
+uint32_t lastRosContactMs = 0;
+bool rosOwnershipObserved = false;
+bool usingBackupAp = false;
+bool stationWasConnected = false;
+uint32_t guiStopCount = 0;
+uint32_t operatorRequestId = 0;
+bool operatorRequestPending = false;
+String operatorRequestType = "";
+float operatorRequestX = 0.0f;
+float operatorRequestY = 0.0f;
+float operatorRequestYaw = 0.0f;
+
+String rosStatusState = "STARTING";
+String rosStatusText = "Waiting for ROS obstacle supervisor";
+String rosStatusReason = "";
+String rosStatusFront = "";
+String rosStatusLeft = "";
+String rosStatusRight = "";
+bool rosStatusResetRequired = true;
+uint32_t rosStatusUpdatedMs = 0;
+
 // ============================================================
 // ROBOT GEOMETRY FROM DYNAMIC MODEL
 // ============================================================
@@ -766,7 +789,9 @@ const char MAIN_page[] PROGMEM = R"rawliteral(
     .grid{display:grid;grid-template-columns:repeat(2,minmax(280px,1fr));gap:14px}
     .controls{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:640px}
     button{padding:12px;border:0;border-radius:7px;font-size:15px;font-weight:bold;background:#2e6be6;color:white;cursor:pointer}
+    button:disabled{opacity:.45;cursor:not-allowed}
     .stop{background:#d7263d;grid-column:span 3;font-size:22px;padding:18px}
+    .reset{background:#d97706}
     .apply{background:#16a34a}.secondary{background:#444}
     input{padding:8px;border-radius:6px;border:1px solid #555;background:#0f0f0f;color:white;font-size:14px;width:84px}
     .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
@@ -774,7 +799,8 @@ const char MAIN_page[] PROGMEM = R"rawliteral(
     td,th{border-bottom:1px solid #333;padding:8px;text-align:right}
     td:first-child,th:first-child{text-align:left}
     canvas{width:100%;height:170px;background:#080808;border:1px solid #333;border-radius:6px}
-    .big{font-size:20px;color:#93c5fd;font-weight:bold}.hint{color:#aaa;font-size:13px}.status{color:#22c55e;font-size:13px}
+    .big{font-size:20px;color:#93c5fd;font-weight:bold}.hint{color:#aaa;font-size:13px}.status{color:#22c55e;font-size:13px}.status.error{color:#f87171}
+    .robot-state{font-size:22px;color:#facc15;font-weight:bold;margin:8px 0}.reason{color:#fca5a5}
     @media(max-width:760px){.grid{grid-template-columns:1fr}.controls{grid-template-columns:repeat(2,1fr)}.stop{grid-column:span 2}table{font-size:12px}input{width:64px}}
   </style>
 </head>
@@ -789,6 +815,7 @@ const char MAIN_page[] PROGMEM = R"rawliteral(
       <span>Y: <span class="big" id="y">--</span></span>
       <span>Yaw: <span class="big" id="yaw">--</span></span>
       <span>IMU: <span class="big" id="imu">--</span></span>
+      <span>Control: <span class="big" id="owner">--</span></span>
     </div>
     <div class="row">
       <span>Target X: <span id="tx">--</span></span>
@@ -803,35 +830,50 @@ const char MAIN_page[] PROGMEM = R"rawliteral(
   </div>
 
   <div class="panel">
+    <b>Obstacle Avoidance Status</b>
+    <div id="robotState" class="robot-state">Waiting for ROS obstacle supervisor</div>
+    <div class="row">
+      <span>Internal state: <span id="robotStateCode">--</span></span>
+      <span>Front: <span id="obsFront">--</span> cm</span>
+      <span>Left: <span id="obsLeft">--</span> cm</span>
+      <span>Right: <span id="obsRight">--</span> cm</span>
+      <span>Reset needed: <span id="resetNeeded">--</span></span>
+    </div>
+    <div id="robotReason" class="reason"></div>
+  </div>
+
+  <div class="panel">
     <b>Pose Command</b>
     <div class="row">
       <label>X m</label><input id="targetX" type="number" value="0.20" step="0.01">
       <label>Y m</label><input id="targetY" type="number" value="0.00" step="0.01">
       <label>Yaw deg</label><input id="targetYaw" type="number" value="0" step="1">
-      <button class="apply" onclick="goPose()">Go To Pose</button>
+      <button id="goPoseButton" class="apply" onclick="goPose()">Go To Pose</button>
+      <button class="reset ros-only" onclick="resetTrial()">Reset Trial (Stay Stopped)</button>
       <button class="secondary" onclick="zeroPose()">Zero Pose</button>
       <button class="secondary" onclick="imuCal()">IMU Cal</button>
+      <span id="commandStatus" class="status"></span>
     </div>
     <div class="controls">
-      <button onclick="manual('fwd')">Forward</button>
-      <button onclick="manual('cw')">CW</button>
-      <button onclick="manual('right')">Right</button>
-      <button onclick="manual('left')">Left</button>
-      <button onclick="manual('ccw')">CCW</button>
-      <button onclick="manual('back')">Backward</button>
+      <button class="direct-control" onclick="manual('fwd')">Forward</button>
+      <button class="direct-control" onclick="manual('cw')">CW</button>
+      <button class="direct-control" onclick="manual('right')">Right</button>
+      <button class="direct-control" onclick="manual('left')">Left</button>
+      <button class="direct-control" onclick="manual('ccw')">CCW</button>
+      <button class="direct-control" onclick="manual('back')">Backward</button>
       <button class="stop" onclick="stopRobot()">STOP</button>
     </div>
     <div class="row">
       <label>Manual speed rad/s</label><input id="manualSpeed" type="number" value="3.0" step="0.1">
-      <span class="hint">Use Go To Pose for outer-loop tuning. Manual buttons bypass pose mode.</span>
+      <span class="hint">With ROS active, Go To Pose and Reset Trial pass through obstacle safety. Manual buttons are disabled.</span>
     </div>
   </div>
 
   <div class="panel">
     <div class="row">
       <b>Outer Loop Tuning</b>
-      <button class="apply" onclick="applyOuter()">Apply Outer</button>
-      <button onclick="loadOuter()">Reload</button>
+      <button class="apply direct-control" onclick="applyOuter()">Apply Outer</button>
+      <button class="direct-control" onclick="loadOuter()">Reload</button>
       <span id="outerStatus" class="status"></span>
     </div>
     <table>
@@ -850,8 +892,8 @@ const char MAIN_page[] PROGMEM = R"rawliteral(
   <div class="panel">
     <div class="row">
       <b>Inner Wheel Tuning</b>
-      <button class="apply" onclick="applyWheelParams()">Apply Wheels</button>
-      <button onclick="loadWheelParams()">Reload</button>
+      <button class="apply direct-control" onclick="applyWheelParams()">Apply Wheels</button>
+      <button class="direct-control" onclick="loadWheelParams()">Reload</button>
       <span id="wheelStatus" class="status"></span>
     </div>
     <table>
@@ -882,13 +924,73 @@ const outerParams=[
 ];
 const hist={x:[],tx:[],y:[],ty:[],yaw:[],tyaw:[],fl:[],fr:[],rl:[],rr:[]};
 const maxPoints=150;
+let commandBusy=0;
+let rosActive=false;
 function val(id){return parseFloat(document.getElementById(id).value||"0")}
 function push(a,v){a.push(v);if(a.length>maxPoints)a.shift()}
-function goPose(){fetch(`/pose?x=${val("targetX")}&y=${val("targetY")}&yaw=${val("targetYaw")}`)}
-function zeroPose(){fetch("/zeroPose")}
-function imuCal(){fetch("/imucal")}
-function stopRobot(){fetch("/stop")}
-function manual(c){fetch(`/move?cmd=${c}&s=${val("manualSpeed")}`)}
+function withGuiSource(url){return url+(url.includes("?")?"&":"?")+"source=gui"}
+function updateOwnership(active){
+  rosActive=active;
+  document.getElementById("owner").textContent=active?"ROS":"GUI";
+  document.querySelectorAll(".direct-control").forEach(button=>button.disabled=active);
+  document.querySelectorAll(".ros-only").forEach(button=>button.disabled=!active);
+  if(!active)document.getElementById("goPoseButton").disabled=false;
+}
+async function fetchTimed(url,timeoutMs=1000){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{return await fetch(withGuiSource(url),{cache:"no-store",signal:controller.signal})}
+  finally{clearTimeout(timer)}
+}
+async function sendCommand(url,label,timeoutMs=1000){
+  const status=document.getElementById("commandStatus");
+  if(commandBusy>0&&label!=="STOP"){
+    status.classList.add("error");
+    status.textContent="Wait for the current request or press STOP";
+    return;
+  }
+  commandBusy++;
+  status.classList.remove("error");
+  status.textContent=`Sending ${label}...`;
+  try{
+    const response=await fetchTimed(url,timeoutMs);
+    if(!response.ok)throw new Error(`HTTP ${response.status}`);
+    status.textContent=`${label} acknowledged`;
+  }catch(error){
+    status.classList.add("error");
+    status.textContent=`${label} failed: ${error.name==="AbortError"?"timeout":error.message}`;
+  }finally{
+    commandBusy=Math.max(0,commandBusy-1);
+  }
+}
+function operatorUrl(action,extra=""){return `/operatorRequest?action=${action}${extra}`}
+function goPose(){
+  if(rosActive){
+    sendCommand(operatorUrl("pose",`&x=${val("targetX")}&y=${val("targetY")}&yaw=${val("targetYaw")}`),"Pose request");
+  }else{
+    sendCommand(`/pose?x=${val("targetX")}&y=${val("targetY")}&yaw=${val("targetYaw")}`,"Pose");
+  }
+}
+function resetTrial(){sendCommand(operatorUrl("reset_trial"),"Reset Trial")}
+function zeroPose(){rosActive?sendCommand(operatorUrl("zero_pose"),"Zero pose request"):sendCommand("/zeroPose","Zero pose")}
+function imuCal(){rosActive?sendCommand(operatorUrl("imu_cal"),"IMU calibration request"):sendCommand("/imucal","IMU calibration",8000)}
+function stopRobot(){sendCommand("/stop","STOP")}
+function manual(c){sendCommand(`/move?cmd=${c}&s=${val("manualSpeed")}`,c)}
+function showDistance(value){return value===null||value===undefined||value===""?"--":Number(value).toFixed(1)}
+function updateRobotStatus(status){
+  if(!status)return;
+  document.getElementById("robotState").textContent=status.text||"Waiting for status";
+  document.getElementById("robotStateCode").textContent=status.state||"--";
+  document.getElementById("obsFront").textContent=showDistance(status.front);
+  document.getElementById("obsLeft").textContent=showDistance(status.left);
+  document.getElementById("obsRight").textContent=showDistance(status.right);
+  document.getElementById("resetNeeded").textContent=status.resetRequired?"YES":"NO";
+  document.getElementById("robotReason").textContent=status.reason?`Reason: ${status.reason}`:"";
+  if(rosActive){
+    const acceptsPose=status.state==="READY"||status.state==="CLEAR";
+    document.getElementById("goPoseButton").disabled=!acceptsPose||Boolean(status.resetRequired);
+  }
+}
 function draw(id, series){
   const c=document.getElementById(id),ctx=c.getContext("2d"),dpr=window.devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
   if(c.width!==w*dpr||c.height!==h*dpr){c.width=w*dpr;c.height=h*dpr}
@@ -898,13 +1000,16 @@ function draw(id, series){
   series.forEach(s=>{ctx.strokeStyle=s.color;ctx.lineWidth=2;ctx.beginPath();s.data.forEach((v,i)=>{let x=i*w/(maxPoints-1),y=h/2-(v/m)*(h*0.42);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)});ctx.stroke()});
 }
 async function poll(){
+  if(commandBusy>0){setTimeout(poll,100);return}
   try{
-    const r=await fetch("/data");const d=await r.json();
+    const r=await fetchTimed("/data",800);const d=await r.json();
     document.getElementById("mode").textContent=d.poseMode?"POSE":"MANUAL";
     document.getElementById("x").textContent=d.pose.x.toFixed(3);
     document.getElementById("y").textContent=d.pose.y.toFixed(3);
     document.getElementById("yaw").textContent=d.pose.yaw.toFixed(1);
     document.getElementById("imu").textContent=d.imu?"OK":"NO";
+    updateOwnership(Boolean(d.rosActive));
+    updateRobotStatus(d.rosStatus);
     document.getElementById("tx").textContent=d.target.x.toFixed(3);
     document.getElementById("ty").textContent=d.target.y.toFixed(3);
     document.getElementById("tyaw").textContent=d.target.yaw.toFixed(1);
@@ -923,23 +1028,24 @@ async function poll(){
     draw("plotYaw",[{data:hist.tyaw,color:"#ffcc00"},{data:hist.yaw,color:"#22c55e"}]);
     draw("plotWheel",[{data:hist.fl,color:"#22c55e"},{data:hist.fr,color:"#38bdf8"},{data:hist.rl,color:"#f97316"},{data:hist.rr,color:"#e879f9"}]);
   }catch(e){}
-  setTimeout(poll,100);
+  setTimeout(poll,rosActive?1000:400);
 }
 function makeWheelTable(data){
   let html="";
   for(const w of wheels){html+=`<tr><td>${w}</td>`;for(const p of wheelParams){html+=`<td><input id="${w}_${p}" type="number" step="0.01" value="${data[w][p]}"></td>`}html+="</tr>"}
   document.getElementById("paramsBody").innerHTML=html;
 }
-async function loadWheelParams(){try{const r=await fetch("/params");makeWheelTable(await r.json());document.getElementById("wheelStatus").textContent="Loaded"}catch(e){}}
-async function applyWheelParams(){document.getElementById("wheelStatus").textContent="Applying...";for(const w of wheels){for(const p of wheelParams){await fetch(`/setParam?wheel=${w}&param=${p}&value=${document.getElementById(`${w}_${p}`).value}`)}}document.getElementById("wheelStatus").textContent="Applied"}
+async function loadWheelParams(){commandBusy++;try{const r=await fetchTimed("/params");makeWheelTable(await r.json());document.getElementById("wheelStatus").textContent="Loaded"}catch(e){document.getElementById("wheelStatus").textContent="Load failed"}finally{commandBusy=Math.max(0,commandBusy-1)}}
+async function applyWheelParams(){commandBusy++;document.getElementById("wheelStatus").textContent="Applying...";try{for(const w of wheels){for(const p of wheelParams){await fetchTimed(`/setParam?wheel=${w}&param=${p}&value=${document.getElementById(`${w}_${p}`).value}`)}}document.getElementById("wheelStatus").textContent="Applied"}catch(e){document.getElementById("wheelStatus").textContent="Apply failed"}finally{commandBusy=Math.max(0,commandBusy-1)}}
 function makeOuterTable(data){
   let html="";
   for(let i=0;i<outerParams.length;i+=3){html+="<tr>";for(let j=0;j<3;j++){const item=outerParams[i+j];if(item){html+=`<td>${item[1]}</td><td><input id="outer_${item[0]}" type="number" step="0.001" value="${data[item[0]]}"></td>`}}html+="</tr>"}
   document.getElementById("outerBody").innerHTML=html;
 }
-async function loadOuter(){try{const r=await fetch("/outer");makeOuterTable(await r.json());document.getElementById("outerStatus").textContent="Loaded"}catch(e){}}
-async function applyOuter(){document.getElementById("outerStatus").textContent="Applying...";for(const p of outerParams){await fetch(`/setOuter?param=${p[0]}&value=${document.getElementById(`outer_${p[0]}`).value}`)}document.getElementById("outerStatus").textContent="Applied"}
-loadWheelParams();loadOuter();poll();
+async function loadOuter(){commandBusy++;try{const r=await fetchTimed("/outer");makeOuterTable(await r.json());document.getElementById("outerStatus").textContent="Loaded"}catch(e){document.getElementById("outerStatus").textContent="Load failed"}finally{commandBusy=Math.max(0,commandBusy-1)}}
+async function applyOuter(){commandBusy++;document.getElementById("outerStatus").textContent="Applying...";try{for(const p of outerParams){await fetchTimed(`/setOuter?param=${p[0]}&value=${document.getElementById(`outer_${p[0]}`).value}`)}document.getElementById("outerStatus").textContent="Applied"}catch(e){document.getElementById("outerStatus").textContent="Apply failed"}finally{commandBusy=Math.max(0,commandBusy-1)}}
+async function initialize(){updateOwnership(false);await loadWheelParams();await loadOuter();poll()}
+initialize();
 </script>
 </body>
 </html>
@@ -948,6 +1054,78 @@ loadWheelParams();loadOuter();poll();
 // ============================================================
 // JSON HELPERS + ROUTES
 // ============================================================
+
+bool requestIsRos() {
+  return server.hasArg("source")
+      && server.arg("source") == "ros"
+      && server.hasArg("controller")
+      && server.arg("controller") == ROS_CONTROL_TOKEN;
+}
+
+bool requestIsGui() {
+  return server.hasArg("source") && server.arg("source") == "gui";
+}
+
+String jsonEscaped(const String& value) {
+  String escaped;
+  escaped.reserve(value.length() + 8);
+  for (size_t i = 0; i < value.length(); i++) {
+    char c = value.charAt(i);
+    if (c == '\\' || c == '"') {
+      escaped += '\\';
+      escaped += c;
+    } else if (c == '\n') {
+      escaped += "\\n";
+    } else if (c != '\r') {
+      escaped += c;
+    }
+  }
+  return escaped;
+}
+
+void noteRosContact() {
+  if (requestIsRos()) {
+    lastRosContactMs = millis();
+    rosOwnershipObserved = true;
+  }
+}
+
+bool rosControlActive() {
+  return lastRosContactMs != 0
+      && (uint32_t)(millis() - lastRosContactMs) < ROS_OWNER_TIMEOUT_MS;
+}
+
+bool rejectGuiCommandWhileRosActive() {
+  if (requestIsRos()) {
+    noteRosContact();
+    return false;
+  }
+
+  if (!requestIsGui()) {
+    server.send(403, "text/plain", "Unknown controller");
+    return true;
+  }
+
+  if (rosControlActive()) {
+    server.send(423, "text/plain", "ROS control active");
+    return true;
+  }
+
+  return false;
+}
+
+void maintainRosOwnership() {
+  if (
+    rosOwnershipObserved
+    && lastRosContactMs != 0
+    && (uint32_t)(millis() - lastRosContactMs) >= ROS_OWNER_TIMEOUT_MS
+  ) {
+    stopAll();
+    rosOwnershipObserved = false;
+    lastRosContactMs = 0;
+    Serial.println("ROS heartbeat lost. Robot stopped; GUI control restored.");
+  }
+}
 
 void sendWheelJsonPart(const Wheel& w, String& json) {
   json += "\"";
@@ -962,9 +1140,34 @@ void sendWheelJsonPart(const Wheel& w, String& json) {
 }
 
 void handleData() {
+  noteRosContact();
+
   String json = "{";
   json += "\"poseMode\":" + String(poseMode ? "true" : "false") + ",";
   json += "\"imu\":" + String(imuOk ? "true" : "false") + ",";
+  json += "\"rosActive\":" + String(rosControlActive() ? "true" : "false") + ",";
+  json += "\"guiStopCount\":" + String(guiStopCount) + ",";
+  json += "\"operatorRequest\":{";
+  json += "\"id\":" + String(operatorRequestId);
+  json += ",\"pending\":" + String(operatorRequestPending ? "true" : "false");
+  json += ",\"type\":\"" + jsonEscaped(operatorRequestType) + "\"";
+  json += ",\"x\":" + String(operatorRequestX, 4);
+  json += ",\"y\":" + String(operatorRequestY, 4);
+  json += ",\"yaw\":" + String(operatorRequestYaw, 3);
+  json += "},";
+  json += "\"rosStatus\":{";
+  json += "\"state\":\"" + jsonEscaped(rosStatusState) + "\"";
+  json += ",\"text\":\"" + jsonEscaped(rosStatusText) + "\"";
+  json += ",\"reason\":\"" + jsonEscaped(rosStatusReason) + "\"";
+  json += ",\"front\":";
+  json += rosStatusFront.length() ? rosStatusFront : "null";
+  json += ",\"left\":";
+  json += rosStatusLeft.length() ? rosStatusLeft : "null";
+  json += ",\"right\":";
+  json += rosStatusRight.length() ? rosStatusRight : "null";
+  json += ",\"resetRequired\":" + String(rosStatusResetRequired ? "true" : "false");
+  json += ",\"ageMs\":" + String(rosStatusUpdatedMs == 0 ? 0 : millis() - rosStatusUpdatedMs);
+  json += "},";
   json += "\"pose\":{\"x\":" + String(poseX, 4) + ",\"y\":" + String(poseY, 4) + ",\"yaw\":" + String(yawDeg, 3) + "},";
   json += "\"target\":{\"x\":" + String(targetX, 4) + ",\"y\":" + String(targetY, 4) + ",\"yaw\":" + String(poseYawTargetDeg, 3) + "},";
   json += "\"cmd\":{\"vx\":" + String(cmdVx, 4) + ",\"vy\":" + String(cmdVy, 4) + ",\"wz\":" + String(cmdWz, 4) + "},";
@@ -1030,6 +1233,10 @@ void handleOuter() {
 }
 
 void handleSetParam() {
+  if (rejectGuiCommandWhileRosActive()) {
+    return;
+  }
+
   Wheel* w = getWheelByName(server.arg("wheel"));
 
   if (w == nullptr) {
@@ -1046,6 +1253,10 @@ void handleSetParam() {
 }
 
 void handleSetOuter() {
+  if (rejectGuiCommandWhileRosActive()) {
+    return;
+  }
+
   if (!setOuterParam(server.arg("param"), server.arg("value").toFloat())) {
     server.send(400, "text/plain", "Unknown outer parameter");
     return;
@@ -1054,7 +1265,90 @@ void handleSetOuter() {
   server.send(200, "text/plain", "OK");
 }
 
+void handleOperatorRequest() {
+  if (!requestIsGui()) {
+    server.send(403, "text/plain", "GUI source required");
+    return;
+  }
+  if (!rosControlActive()) {
+    server.send(503, "text/plain", "ROS obstacle supervisor is not connected");
+    return;
+  }
+  if (operatorRequestPending) {
+    server.send(409, "text/plain", "Previous operator request is still pending");
+    return;
+  }
+
+  String action = server.arg("action");
+  if (
+    action != "pose"
+    && action != "reset_trial"
+    && action != "zero_pose"
+    && action != "imu_cal"
+  ) {
+    server.send(400, "text/plain", "Unsupported operator action");
+    return;
+  }
+
+  operatorRequestType = action;
+  if (action == "pose") {
+    if (!server.hasArg("x") || !server.hasArg("y") || !server.hasArg("yaw")) {
+      server.send(400, "text/plain", "Pose requires x, y, and yaw");
+      return;
+    }
+    operatorRequestX = constrain(server.arg("x").toFloat(), -5.0f, 5.0f);
+    operatorRequestY = constrain(server.arg("y").toFloat(), -5.0f, 5.0f);
+    operatorRequestYaw = constrain(server.arg("yaw").toFloat(), -180.0f, 180.0f);
+  } else {
+    operatorRequestX = 0.0f;
+    operatorRequestY = 0.0f;
+    operatorRequestYaw = 0.0f;
+  }
+
+  operatorRequestId++;
+  operatorRequestPending = true;
+  server.send(202, "text/plain", "Queued for ROS obstacle supervisor");
+}
+
+void handleOperatorAck() {
+  if (!requestIsRos()) {
+    server.send(403, "text/plain", "ROS controller required");
+    return;
+  }
+  noteRosContact();
+
+  uint32_t acknowledgedId = (uint32_t)server.arg("id").toInt();
+  if (operatorRequestPending && acknowledgedId == operatorRequestId) {
+    operatorRequestPending = false;
+    server.send(200, "text/plain", "ACK");
+    return;
+  }
+  server.send(409, "text/plain", "Request id does not match");
+}
+
+void handleRosStatus() {
+  if (!requestIsRos()) {
+    server.send(403, "text/plain", "ROS controller required");
+    return;
+  }
+  noteRosContact();
+
+  rosStatusState = server.arg("state");
+  rosStatusText = server.arg("text");
+  rosStatusReason = server.arg("reason");
+  rosStatusFront = server.arg("front");
+  rosStatusLeft = server.arg("left");
+  rosStatusRight = server.arg("right");
+  rosStatusResetRequired = server.arg("reset") == "1";
+  rosStatusUpdatedMs = millis();
+  server.send(200, "text/plain", "STATUS");
+}
+
 void handlePose() {
+  if (rejectGuiCommandWhileRosActive()) {
+    return;
+  }
+
   float x = server.arg("x").toFloat();
   float y = server.arg("y").toFloat();
   float yaw = server.arg("yaw").toFloat();
@@ -1068,6 +1362,10 @@ void handlePose() {
 }
 
 void handleMove() {
+  if (rejectGuiCommandWhileRosActive()) {
+    return;
+  }
+
   poseMode = false;
   resetOuterPID();
 
@@ -1093,17 +1391,33 @@ void handleMove() {
 }
 
 void handleStop() {
+  if (requestIsRos()) {
+    noteRosContact();
+  } else if (requestIsGui()) {
+    guiStopCount++;
+  } else {
+    server.send(403, "text/plain", "Unknown controller");
+    return;
+  }
   stopAll();
   server.send(200, "text/plain", "STOP");
 }
 
 void handleZeroPose() {
+  if (rejectGuiCommandWhileRosActive()) {
+    return;
+  }
+
   stopAll();
   zeroPose();
   server.send(200, "text/plain", "ZERO");
 }
 
 void handleImuCal() {
+  if (rejectGuiCommandWhileRosActive()) {
+    return;
+  }
+
   stopAll();
   calibrateIMU(1200);
   server.send(200, "text/plain", "IMU CAL");
@@ -1141,6 +1455,11 @@ void initEncoderState(Wheel& w) {
 
 void setupWiFi() {
   WiFi.mode(WIFI_STA);
+#if defined(ESP32)
+  WiFi.setSleep(false);
+#elif defined(ESP8266)
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+#endif
   WiFi.config(localIP, gateway, subnet);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
@@ -1156,15 +1475,46 @@ void setupWiFi() {
   Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
+    stationWasConnected = true;
     Serial.print("Connected. Open: http://");
     Serial.println(WiFi.localIP());
   } else {
+    usingBackupAp = true;
     Serial.println("WiFi failed. Starting backup AP DeliveryRobot_AP / 12345678");
     WiFi.mode(WIFI_AP);
     WiFi.softAP("DeliveryRobot_AP", "12345678");
     Serial.print("Open: http://");
     Serial.println(WiFi.softAPIP());
   }
+}
+
+void maintainWiFi() {
+  if (usingBackupAp) {
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    stationWasConnected = true;
+    return;
+  }
+
+  if (stationWasConnected) {
+    stationWasConnected = false;
+    stopAll();
+    Serial.println("WiFi disconnected. Robot stopped.");
+  }
+
+  static uint32_t lastReconnectAttemptMs = 0;
+  uint32_t now = millis();
+  if (now - lastReconnectAttemptMs < 5000) {
+    return;
+  }
+
+  lastReconnectAttemptMs = now;
+  WiFi.disconnect();
+  WiFi.config(localIP, gateway, subnet);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.println("Attempting WiFi reconnection...");
 }
 
 // ============================================================
@@ -1218,6 +1568,9 @@ void setup() {
   server.on("/outer", handleOuter);
   server.on("/setParam", handleSetParam);
   server.on("/setOuter", handleSetOuter);
+  server.on("/operatorRequest", handleOperatorRequest);
+  server.on("/operatorAck", handleOperatorAck);
+  server.on("/rosStatus", handleRosStatus);
   server.on("/pose", handlePose);
   server.on("/move", handleMove);
   server.on("/stop", handleStop);
@@ -1233,6 +1586,8 @@ void loop() {
   static uint32_t lastImu = 0;
 
   server.handleClient();
+  maintainWiFi();
+  maintainRosOwnership();
 
   uint32_t now = millis();
 
