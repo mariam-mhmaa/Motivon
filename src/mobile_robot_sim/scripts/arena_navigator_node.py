@@ -5,11 +5,11 @@ arena_navigator_node.py
 Sequential delivery navigation for the 4.5x4.5m arena.
 
 Route:
-  Spawn (1.55, -3.43) facing North
+  Spawn (1.30, -1.50) facing North
     → WP1 (0.99, -0.94)  lid open 5 s → close → rotate West  (world yaw = 180°)
     → WP2 (-1.02, -0.01) lid open 5 s → close → rotate North (world yaw = 90°)
     → WP3 (-0.19, 1.64)  lid open 5 s → close → return home
-    → HOME (0.99, 0.94)  → IDLE
+    → HOME (1.30, -1.50) → IDLE
 
 Enable navigation:
   ros2 service call /robot_enable std_srvs/srv/SetBool "{data: true}"
@@ -39,8 +39,8 @@ class ArenNavigatorNode(Node):
     STATE_IDLE        = 'IDLE'
 
     # ── Spawn pose (world frame) ───────────────────────────
-    SPAWN_X   = 1.55
-    SPAWN_Y   = -3.43
+    SPAWN_X   = 1.30
+    SPAWN_Y   = -1.50
     SPAWN_YAW = math.pi / 2.0   # robot spawns facing North (+Y)
 
     # ── Delivery targets (world frame) ─────────────────────
@@ -52,7 +52,7 @@ class ArenNavigatorNode(Node):
         (-0.07, -0.38),   # 4  WP3b  (waypoint only)
     ]
     TARGET_NAMES  = ['WP1', 'WP1b', 'WP2', 'WP3', 'WP3b']
-    WORLD_HOME    = (1.30, -0.40)
+    WORLD_HOME    = (1.30, -1.50)
 
     # Indices that are delivery stops (lid opens)
     LID_INDICES = frozenset({0, 2, 3})
@@ -147,7 +147,7 @@ class ArenNavigatorNode(Node):
 
         self.get_logger().info(
             'Arena Navigator started.\n'
-            '  Route: WP1(0.99,-0.94) → WP2(-1.02,-0.01) → WP3(-0.19,1.64) → HOME(0.99,0.94)\n'
+            '  Route: WP1(0.99,-0.94) → WP2(-1.02,-0.01) → WP3(-0.19,1.64) → HOME(1.30,-1.50)\n'
             '  Enable: ros2 service call /robot_enable std_srvs/srv/SetBool "{data: true}"')
 
     # ═══════════════════════════════════════════════════

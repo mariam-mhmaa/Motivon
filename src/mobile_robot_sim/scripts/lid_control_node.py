@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
+import json
+
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float64, Bool
+from std_msgs.msg import Float64, Bool, String
 from sensor_msgs.msg import JointState
 from std_srvs.srv import SetBool
 
@@ -38,7 +40,9 @@ class LidControlNode(Node):
 
         # Publish lid closed state for navigator
         self._closed_pub = self.create_publisher(Bool, '/lid_closed', 1)
+        self._state_pub = self.create_publisher(String, '/lid_state', 10)
         self._lid_pos = 0.0
+        self._lid_state = 'closed'
         self.create_subscription(JointState, '/joint_states', self._js_cb, 10)
 
         self.get_logger().info('Lid Control Node started. Service: /lid_control')
@@ -46,6 +50,7 @@ class LidControlNode(Node):
     def lid_service_cb(self, request, response):
         if request.data:
             self.target = self.LID_OPEN
+            self._publish_state('opening', 'service_open')
             response.message = 'Lid opened (will auto-close in 10 s)'
             self.get_logger().info('Lid OPENED via service – auto-close in 10 s')
             # Cancel any existing auto-close timer, then start a new one
@@ -56,6 +61,7 @@ class LidControlNode(Node):
         else:
             self._cancel_auto_close()
             self.target = self.LID_CLOSED
+            self._publish_state('closing', 'service_close')
             response.message = 'Lid closed'
             self.get_logger().info('Lid CLOSED via service')
         response.success = True
@@ -63,6 +69,7 @@ class LidControlNode(Node):
 
     def _auto_close_cb(self):
         self.target = self.LID_CLOSED
+        self._publish_state('closing', 'auto_close')
         self.get_logger().info('Lid AUTO-CLOSED after 10 s')
         self._cancel_auto_close()
 
@@ -80,11 +87,28 @@ class LidControlNode(Node):
         closed = Bool()
         closed.data = (self._lid_pos <= 0.005)
         self._closed_pub.publish(closed)
+        if self._lid_pos >= self.LID_OPEN - 0.01:
+            self._publish_state('open', 'joint_feedback')
+        elif self._lid_pos <= 0.005:
+            self._publish_state('closed', 'joint_feedback')
 
     def publish_position(self):
         msg = Float64()
         msg.data = self.target
         self.pub.publish(msg)
+
+    def _publish_state(self, state, reason):
+        if state == self._lid_state:
+            return
+        self._lid_state = state
+        msg = String()
+        msg.data = json.dumps({
+            'state': state,
+            'reason': reason,
+            'target': self.target,
+            'position': self._lid_pos,
+        })
+        self._state_pub.publish(msg)
 
 
 def main(args=None):

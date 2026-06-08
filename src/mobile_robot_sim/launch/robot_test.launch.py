@@ -15,15 +15,12 @@ def generate_launch_description():
     world_file_path = os.path.join(pkg_share, 'world', 'arena_world.sdf')
     ekf_config_path = os.path.join(pkg_share, 'config', 'ekf_config.yaml')
 
-    # Model paths for workshop_example world
-    # pkg_share is install/.../share/mobile_robot_sim — workspace root is 4 levels up
     ws_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(pkg_share))))
     collection_models = os.path.join(ws_root, 'src', 'mobile_robot_sim', 'worldd',
                                      'gazebo_models_worlds_collection', 'models')
     osrf_models = os.path.expanduser('~/.gz/models')
     gz_resource_path = f'{collection_models}:{osrf_models}'
 
-    # Robot State Publisher
     robot_state_publisher_node = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
@@ -36,7 +33,6 @@ def generate_launch_description():
         ]
     )
 
-    # Gazebo Sim Launch
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             [os.path.join(get_package_share_directory('ros_gz_sim'), 'launch', 'gz_sim.launch.py')]
@@ -44,9 +40,6 @@ def generate_launch_description():
         launch_arguments={'gz_args': f'-r -v 4 {world_file_path}'}.items()
     )
 
-    # ROS-Gazebo Bridge
-    # /cmd_vel on ROS side -> /model/DeliveryRobot_Sim/cmd_vel on Gazebo side (MecanumDrive listens here)
-    # /model/DeliveryRobot_Sim/odometry on Gazebo side -> /odom on ROS side
     bridge_gz = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
@@ -69,7 +62,6 @@ def generate_launch_description():
         ]
     )
 
-    # Spawn robot
     node_gz_spawn_entity = Node(
         package='ros_gz_sim',
         executable='create',
@@ -83,10 +75,6 @@ def generate_launch_description():
         parameters=[{'use_sim_time': True}]
     )
 
-    # ── Kill stale Gazebo processes from any previous run ────────────────
-    # If a previous gz sim is still running, launching again would attach to
-    # the old world where the robot is at its last position and the entity
-    # 'DeliveryRobot_Sim' already exists, causing the respawn to fail silently.
     kill_stale = ExecuteProcess(
         cmd=['bash', '-c',
              'pkill -9 -f "gz sim"   2>/dev/null; '
@@ -95,14 +83,9 @@ def generate_launch_description():
              'sleep 0.5; true'],
         output='log')
 
-    # Delay Gazebo start by 2 s so the kill above finishes first
     delay_gazebo = TimerAction(period=2.0, actions=[gazebo])
+    delay_spawn  = TimerAction(period=7.0, actions=[node_gz_spawn_entity])
 
-    # Spawn at t=7 s — Gazebo starts at t=2 and needs ~5 s to fully load
-    delay_spawn = TimerAction(period=7.0, actions=[node_gz_spawn_entity])
-
-    # EKF, lid control, start-stop all start at t=10 s so the robot is
-    # physically in place and the bridge is delivering real odometry
     robot_localization_node = Node(
         package='robot_localization',
         executable='ekf_node',
@@ -112,7 +95,6 @@ def generate_launch_description():
     )
     delay_ekf = TimerAction(period=10.0, actions=[robot_localization_node])
 
-    # Lid Control Node (Gazebo-native JointPositionController handles the physics)
     lid_control_node = Node(
         package='mobile_robot_sim',
         executable='lid_control_node.py',
@@ -149,7 +131,6 @@ def generate_launch_description():
     )
     delay_ultrasonic = TimerAction(period=10.5, actions=[ultrasonic_node])
 
-    # Start/Stop Node (gates /cmd_vel_input -> /cmd_vel)
     start_stop_node = Node(
         package='mobile_robot_sim',
         executable='start_stop_node.py',
@@ -186,36 +167,38 @@ def generate_launch_description():
     )
     delay_vision_auth = TimerAction(period=10.5, actions=[vision_auth_node])
 
+    mecanum_drive_node = Node(
+        package='mobile_robot_sim',
+        executable='mecanum_drive_node.py',
+        name='mecanum_drive_node',
+        output='screen',
+        parameters=[{'use_sim_time': True}]
+    )
+    delay_mecanum = TimerAction(period=10.0, actions=[mecanum_drive_node])
+
     set_gz_resource_path = SetEnvironmentVariable(
         name='GZ_SIM_RESOURCE_PATH',
         value=gz_resource_path
     )
 
-    # Arena Navigator Node – delivery route for the 4.5x4.5m arena
-    navigator_node = Node(
-        package='mobile_robot_sim',
-        executable='arena_navigator_node.py',
-        name='arena_navigator_node',
-        output='screen',
-        parameters=[{'use_sim_time': True}]
-    )
-    delay_navigator = TimerAction(period=13.0, actions=[navigator_node])
+    # arena_navigator_node is intentionally excluded so test scripts
+    # have exclusive control of /cmd_vel_input
 
     return LaunchDescription([
         set_gz_resource_path,
-        kill_stale,                  # t=0: kill any stale gz sim
-        delay_gazebo,                # t=2: fresh Gazebo world
-        bridge_gz,                   # starts immediately (retries until Gazebo ready)
+        kill_stale,
+        delay_gazebo,
+        bridge_gz,
         robot_state_publisher_node,
-        delay_spawn,                 # t=7: spawn robot
-        delay_ekf,                   # t=10: EKF after robot is spawned
-        delay_lid_control,           # t=10: lid control
-        delay_encoder_odometry,      # t=10.5: encoder odom interface
-        delay_imu,                   # t=10.5: imu interface
-        delay_ultrasonic,            # t=10.5: ultrasonic interface
-        delay_start_stop,            # t=10: start-stop gate
-        delay_pid_interface,         # t=10.5: pid target interface
-        delay_state_led,             # t=10.5: led state mapper
-        delay_vision_auth,           # t=10.5: vision event bridge
-        # delay_navigator,           # t=13: DISABLED – run test_wp*.py scripts manually
+        delay_spawn,
+        delay_ekf,
+        delay_lid_control,
+        delay_encoder_odometry,
+        delay_imu,
+        delay_ultrasonic,
+        delay_start_stop,
+        delay_pid_interface,
+        delay_state_led,
+        delay_vision_auth,
+        delay_mecanum,
     ])
