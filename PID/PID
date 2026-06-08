@@ -43,6 +43,9 @@ String rosStatusReason = "";
 String rosStatusFront = "";
 String rosStatusLeft = "";
 String rosStatusRight = "";
+String rosStatusGoalX = "";
+String rosStatusGoalY = "";
+String rosStatusGoalYaw = "";
 bool rosStatusResetRequired = true;
 uint32_t rosStatusUpdatedMs = 0;
 
@@ -818,14 +821,20 @@ const char MAIN_page[] PROGMEM = R"rawliteral(
       <span>Control: <span class="big" id="owner">--</span></span>
     </div>
     <div class="row">
-      <span>Target X: <span id="tx">--</span></span>
-      <span>Target Y: <span id="ty">--</span></span>
-      <span>Target Yaw: <span id="tyaw">--</span></span>
+      <span>Current waypoint X: <span id="tx">--</span></span>
+      <span>Current waypoint Y: <span id="ty">--</span></span>
+      <span>Current waypoint Yaw: <span id="tyaw">--</span></span>
       <span>cmd vx: <span id="cvx">--</span></span>
       <span>cmd vy: <span id="cvy">--</span></span>
       <span>cmd wz: <span id="cwz">--</span></span>
       <span>Odom X scale: <span id="odomx">--</span></span>
       <span>Odom Y scale: <span id="odomy">--</span></span>
+    </div>
+    <div class="row">
+      <span>Final destination X: <span class="big" id="goalX">--</span></span>
+      <span>Final destination Y: <span class="big" id="goalY">--</span></span>
+      <span>Final destination Yaw: <span class="big" id="goalYaw">--</span></span>
+      <span class="hint">The current waypoint changes during avoidance; the final destination does not.</span>
     </div>
   </div>
 
@@ -986,6 +995,9 @@ function updateRobotStatus(status){
   document.getElementById("obsRight").textContent=showDistance(status.right);
   document.getElementById("resetNeeded").textContent=status.resetRequired?"YES":"NO";
   document.getElementById("robotReason").textContent=status.reason?`Reason: ${status.reason}`:"";
+  document.getElementById("goalX").textContent=status.finalTarget&&status.finalTarget.x!==null?Number(status.finalTarget.x).toFixed(3):"--";
+  document.getElementById("goalY").textContent=status.finalTarget&&status.finalTarget.y!==null?Number(status.finalTarget.y).toFixed(3):"--";
+  document.getElementById("goalYaw").textContent=status.finalTarget&&status.finalTarget.yaw!==null?Number(status.finalTarget.yaw).toFixed(1):"--";
   if(rosActive){
     const acceptsPose=status.state==="READY"||status.state==="CLEAR";
     document.getElementById("goPoseButton").disabled=!acceptsPose||Boolean(status.resetRequired);
@@ -1165,6 +1177,13 @@ void handleData() {
   json += rosStatusLeft.length() ? rosStatusLeft : "null";
   json += ",\"right\":";
   json += rosStatusRight.length() ? rosStatusRight : "null";
+  json += ",\"finalTarget\":{\"x\":";
+  json += rosStatusGoalX.length() ? rosStatusGoalX : "null";
+  json += ",\"y\":";
+  json += rosStatusGoalY.length() ? rosStatusGoalY : "null";
+  json += ",\"yaw\":";
+  json += rosStatusGoalYaw.length() ? rosStatusGoalYaw : "null";
+  json += "}";
   json += ",\"resetRequired\":" + String(rosStatusResetRequired ? "true" : "false");
   json += ",\"ageMs\":" + String(rosStatusUpdatedMs == 0 ? 0 : millis() - rosStatusUpdatedMs);
   json += "},";
@@ -1339,6 +1358,9 @@ void handleRosStatus() {
   rosStatusFront = server.arg("front");
   rosStatusLeft = server.arg("left");
   rosStatusRight = server.arg("right");
+  rosStatusGoalX = server.arg("goal_x");
+  rosStatusGoalY = server.arg("goal_y");
+  rosStatusGoalYaw = server.arg("goal_yaw");
   rosStatusResetRequired = server.arg("reset") == "1";
   rosStatusUpdatedMs = millis();
   server.send(200, "text/plain", "STATUS");

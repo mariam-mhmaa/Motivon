@@ -156,11 +156,24 @@ class EspHttpBridgeNode(Node):
             "right": self.query_distance(state.get("right_cm")),
             "reset": "1" if state.get("reset_required", False) else "0",
         }
+        final_destination = state.get("final_destination") or {}
+        query.update(
+            {
+                "goal_x": self.query_distance(final_destination.get("x")),
+                "goal_y": self.query_distance(final_destination.get("y")),
+                "goal_yaw": self.query_distance(
+                    final_destination.get("yaw")
+                ),
+            }
+        )
         signature = (
             query["state"],
             query["text"],
             query["reason"],
             query["reset"],
+            query["goal_x"],
+            query["goal_y"],
+            query["goal_yaw"],
         )
         now = time.monotonic()
         if (

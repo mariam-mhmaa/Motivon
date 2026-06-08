@@ -61,6 +61,7 @@ obstacle_decision_node:
     avoidance_stall_timeout_s: 3.0
     avoidance_progress_m: 0.02
     avoidance_pause_timeout_s: 0.0
+    max_static_replans: 4
     avoidance_measurement_mode: false
     avoidance_command_retry_s: 0.50
     pose_tolerance_m: 0.06

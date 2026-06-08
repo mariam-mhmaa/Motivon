@@ -69,6 +69,7 @@ class ObstacleDecisionNode(Node):
         self.declare_parameter("avoidance_stall_timeout_s", 3.0)
         self.declare_parameter("avoidance_progress_m", 0.02)
         self.declare_parameter("avoidance_pause_timeout_s", 0.0)
+        self.declare_parameter("max_static_replans", 4)
         self.declare_parameter("avoidance_measurement_mode", False)
         self.declare_parameter("avoidance_command_retry_s", 0.50)
         self.declare_parameter("pose_tolerance_m", 0.06)
@@ -172,6 +173,10 @@ class ObstacleDecisionNode(Node):
         self.avoidance_pause_timeout_s = float(
             self.get_parameter("avoidance_pause_timeout_s").value
         )
+        self.max_static_replans = max(
+            1,
+            int(self.get_parameter("max_static_replans").value),
+        )
         self.avoidance_measurement_mode = bool(
             self.get_parameter("avoidance_measurement_mode").value
         )
@@ -213,6 +218,18 @@ class ObstacleDecisionNode(Node):
         self.safety_hazard_sensor = None
         self.saved_target = None
         self.saved_pose_mode = False
+        self.original_target_resume_pending = False
+        self.last_original_target_resume_command_s = None
+        self.nominal_path_start = None
+        self.nominal_path_goal = None
+        self.nominal_path_axis = None
+        self.nominal_path_length_m = None
+        self.nominal_path_max_progress_m = 0.0
+        self.static_replan_count = 0
+        self.rejoin_nominal_after_avoidance = False
+        self.forbidden_detour_directions = set()
+        self.avoidance_pause_obstacle_direction = None
+        self.primary_travel_direction = "front"
         self.avoidance_side = None
         self.side_obstacle_direction = None
         self.longitudinal_detour_direction = None
@@ -274,6 +291,9 @@ class ObstacleDecisionNode(Node):
         self.safety_hazard_sensor = None
         self.saved_target = None
         self.saved_pose_mode = False
+        self.original_target_resume_pending = False
+        self.last_original_target_resume_command_s = None
+        self.reset_nominal_path()
         self.avoidance_abort_reason = None
         self.reset_avoidance()
 
@@ -296,6 +316,7 @@ class ObstacleDecisionNode(Node):
             "STATIC_SIDE_STRAFE_MARGIN": "Side obstacle: adding sideways body clearance",
             "STATIC_SIDE_RETURN_WAIT_CLEAR": "Side obstacle: checking the path back to the original line",
             "STATIC_SIDE_RETURN_PATH": "Side obstacle: returning to the original sideways path",
+            "STATIC_NOMINAL_REJOIN": "Multiple obstacles cleared: returning to the closest point on the navigation path",
             "MEASUREMENT_PAUSED": "Measurement checkpoint; robot stopped until Continue Measurement",
             "AVOIDANCE_PAUSED": "Temporary obstacle detected; stopped until the movement direction is clear",
             "AVOIDANCE_ABORTED": "Avoidance could not continue; reset is required",
@@ -462,7 +483,10 @@ class ObstacleDecisionNode(Node):
         self.safety_release_since = None
         self.safety_hazard_sensor = None
         self.avoidance_abort_reason = None
+        self.original_target_resume_pending = False
+        self.last_original_target_resume_command_s = None
         self.reset_avoidance()
+        self.initialize_nominal_path(pose_command)
         self.publish_command(pose_command)
         self.get_logger().warn(
             "Operator pose accepted: "
@@ -479,15 +503,30 @@ class ObstacleDecisionNode(Node):
                 f"Temporary obstacle {self.avoidance_pause_sensor}; "
                 "stopped and waiting to continue"
             )
+        elif self.state == "AVOIDANCE_ABORTED":
+            state_text = (
+                "Avoidance stopped safely"
+                if not self.avoidance_abort_reason
+                else (
+                    "Avoidance stopped safely: "
+                    f"{self.avoidance_abort_reason.replace('_', ' ')}"
+                )
+            )
         elif self.state == "MEASUREMENT_PAUSED":
             state_text = (
                 f"Measurement checkpoint {self.measurement_checkpoint}; "
                 "robot stopped until Continue Measurement"
             )
+        final_destination = (
+            self.saved_target
+            if self.saved_target is not None
+            else self.nominal_path_goal
+        )
         payload = {
             "state": self.state,
             "state_text": state_text,
             "reason": self.status_reason,
+            "final_destination": final_destination,
             "reset_required": self.state in (
                 "AVOIDANCE_ABORTED",
                 "OPERATOR_STOPPED",
@@ -533,6 +572,20 @@ class ObstacleDecisionNode(Node):
                 else max(0.0, now - self.avoidance_pause_started_s)
             ),
             "avoidance_abort_reason": self.avoidance_abort_reason,
+            "original_target_resume_pending": (
+                self.original_target_resume_pending
+            ),
+            "static_replan_count": self.static_replan_count,
+            "rejoin_nominal_after_avoidance": (
+                self.rejoin_nominal_after_avoidance
+            ),
+            "forbidden_detour_directions": sorted(
+                self.forbidden_detour_directions
+            ),
+            "interrupted_obstacle_direction": (
+                self.avoidance_pause_obstacle_direction
+            ),
+            "nominal_path": self.nominal_path_summary(),
             "front_edge_detector": self.edge_detector_summary(
                 self.front_edge_detector
             ),
@@ -672,7 +725,10 @@ class ObstacleDecisionNode(Node):
         if self.state == "STATIC_STRAFE_FIND_EDGE":
             self.update_edge_detector(
                 self.front_edge_detector,
-                self.raw_distance("front_center"),
+                self.direction_distance(
+                    self.primary_travel_direction,
+                    raw=True,
+                ),
             )
         elif (
             self.state == "STATIC_FORWARD_FIND_EDGE"
@@ -710,6 +766,7 @@ class ObstacleDecisionNode(Node):
             return
 
         self.esp_data = esp_data
+        self.nominal_path_projection(update_progress=True)
 
         try:
             gui_stop_count = int(esp_data.get("guiStopCount", 0))
@@ -825,11 +882,14 @@ class ObstacleDecisionNode(Node):
         return forward, left, rotation
 
     def intended_directions(self):
+        if self.state == "STATIC_NOMINAL_REJOIN":
+            return self.waypoint_directions(self.avoidance_target)
+
         stage_directions = {
             "STATIC_STRAFE_FIND_EDGE": {self.avoidance_side},
             "STATIC_STRAFE_MARGIN": {self.avoidance_side},
-            "STATIC_FORWARD_FIND_EDGE": {"front"},
-            "STATIC_FORWARD_MARGIN": {"front"},
+            "STATIC_FORWARD_FIND_EDGE": {self.primary_travel_direction},
+            "STATIC_FORWARD_MARGIN": {self.primary_travel_direction},
             "STATIC_RETURN_WAIT_CLEAR": set(),
             "STATIC_RETURN_PATH": {
                 "right" if self.avoidance_side == "left" else "left"
@@ -916,6 +976,28 @@ class ObstacleDecisionNode(Node):
 
         return directions
 
+    def waypoint_directions(self, waypoint):
+        pose = self.current_pose()
+        if pose is None or waypoint is None:
+            return set()
+
+        dx = waypoint["x"] - pose["x"]
+        dy = waypoint["y"] - pose["y"]
+        yaw_rad = math.radians(pose["yaw"])
+        forward_error = math.cos(yaw_rad) * dx + math.sin(yaw_rad) * dy
+        left_error = -math.sin(yaw_rad) * dx + math.cos(yaw_rad) * dy
+
+        directions = set()
+        if forward_error > self.pose_tolerance_m:
+            directions.add("front")
+        elif forward_error < -self.pose_tolerance_m:
+            directions.add("back")
+        if left_error > self.pose_tolerance_m:
+            directions.add("left")
+        elif left_error < -self.pose_tolerance_m:
+            directions.add("right")
+        return directions
+
     def enter_front_wait(self, reason):
         first_stop = self.state != "WAITING_DYNAMIC"
         if self.state == "CLEAR":
@@ -940,16 +1022,22 @@ class ObstacleDecisionNode(Node):
 
     def pause_avoidance(self, sensor, reason):
         if self.state != "AVOIDANCE_PAUSED":
+            interrupted_state = self.state
             self.avoidance_pause_state = self.state
             self.avoidance_pause_sensor = sensor
             self.avoidance_pause_started_s = self.now_s()
+            self.avoidance_pause_obstacle_direction = (
+                self.active_avoidance_obstacle_direction(interrupted_state)
+            )
             self.safety_release_since = None
             self.state = "AVOIDANCE_PAUSED"
             self.status_reason = reason
             self.status_reason_state = self.state
             self.get_logger().warn(
                 f"Temporary obstacle {sensor}; stopping {self.avoidance_pause_state} "
-                "and waiting to continue."
+                "and waiting to continue. "
+                "Remembered previous obstacle direction="
+                f"{self.avoidance_pause_obstacle_direction}."
             )
         self.publish_stop(reason, force=True)
 
@@ -1018,29 +1106,85 @@ class ObstacleDecisionNode(Node):
                 return key, value
         return None, None
 
-    def choose_avoidance_side(self):
-        left = self.distance("left")
-        right = self.distance("right")
+    def choose_direction_by_clearance(self, candidates, context):
+        allowed = {
+            direction: distance
+            for direction, distance in candidates.items()
+            if direction not in self.forbidden_detour_directions
+            and distance is not None
+            and distance > self.avoidance_side_limit_cm
+        }
+        rejected = sorted(
+            direction
+            for direction in candidates
+            if direction in self.forbidden_detour_directions
+        )
 
-        if left is not None and right is not None:
-            return "left" if left >= right else "right"
-        if left is not None:
-            return "left"
-        if right is not None:
-            return "right"
+        if len(allowed) == 1:
+            direction = next(iter(allowed))
+            self.get_logger().warn(
+                f"{context}: forced safe direction={direction}; "
+                f"direction(s) toward previous obstacle rejected={rejected}."
+            )
+            return direction
+        if len(allowed) > 1:
+            return max(allowed, key=allowed.get)
+
+        self.get_logger().error(
+            f"{context}: no safe direction available; "
+            f"readings={candidates}, forbidden={rejected}."
+        )
         return None
+
+    def active_avoidance_obstacle_direction(self, state):
+        if state in ("STATIC_STRAFE_FIND_EDGE", "STATIC_STRAFE_MARGIN"):
+            return self.primary_travel_direction
+
+        if state in ("STATIC_FORWARD_FIND_EDGE", "STATIC_FORWARD_MARGIN"):
+            if self.avoidance_side == "left":
+                return "right"
+            if self.avoidance_side == "right":
+                return "left"
+
+        if state == "STATIC_RETURN_PATH":
+            return self.opposite_direction(self.primary_travel_direction)
+
+        if state in (
+            "STATIC_SIDE_LONGITUDINAL_FIND_EDGE",
+            "STATIC_SIDE_LONGITUDINAL_MARGIN",
+        ):
+            return self.side_obstacle_direction
+
+        if state in (
+            "STATIC_SIDE_STRAFE_FIND_EDGE",
+            "STATIC_SIDE_STRAFE_MARGIN",
+        ):
+            return self.opposite_direction(
+                self.longitudinal_detour_direction
+            )
+
+        if state == "STATIC_SIDE_RETURN_PATH":
+            return self.opposite_direction(self.side_obstacle_direction)
+
+        return None
+
+    def choose_avoidance_side(self):
+        return self.choose_direction_by_clearance(
+            {
+                "left": self.distance("left"),
+                "right": self.distance("right"),
+            },
+            "Choosing left/right avoidance",
+        )
 
     def choose_longitudinal_avoidance_direction(self):
-        front = self.front_distance()
-        back = self.distance("back_center")
-
-        if front is not None and back is not None:
-            return "front" if front >= back else "back"
-        if front is not None:
-            return "front"
-        if back is not None:
-            return "back"
-        return None
+        return self.choose_direction_by_clearance(
+            {
+                "front": self.front_distance(),
+                "back": self.distance("back_center"),
+            },
+            "Choosing front/back avoidance",
+        )
 
     @staticmethod
     def opposite_direction(direction):
@@ -1093,6 +1237,108 @@ class ObstacleDecisionNode(Node):
         except (KeyError, TypeError, ValueError):
             return None
 
+    def reset_nominal_path(self):
+        self.nominal_path_start = None
+        self.nominal_path_goal = None
+        self.nominal_path_axis = None
+        self.nominal_path_length_m = None
+        self.nominal_path_max_progress_m = 0.0
+        self.static_replan_count = 0
+        self.rejoin_nominal_after_avoidance = False
+        self.forbidden_detour_directions.clear()
+
+    def initialize_nominal_path(self, pose_command):
+        pose = self.current_pose()
+        if pose is None:
+            self.reset_nominal_path()
+            return False
+
+        dx = pose_command["x"] - pose["x"]
+        dy = pose_command["y"] - pose["y"]
+        length_m = math.hypot(dx, dy)
+        if length_m <= self.pose_tolerance_m:
+            self.reset_nominal_path()
+            return False
+
+        self.nominal_path_start = dict(pose)
+        self.nominal_path_goal = {
+            "x": pose_command["x"],
+            "y": pose_command["y"],
+            "yaw": pose_command["yaw"],
+        }
+        self.nominal_path_axis = (dx / length_m, dy / length_m)
+        self.nominal_path_length_m = length_m
+        self.nominal_path_max_progress_m = 0.0
+        self.static_replan_count = 0
+        self.rejoin_nominal_after_avoidance = False
+        self.forbidden_detour_directions.clear()
+        self.get_logger().warn(
+            "Demo navigation path initialized: "
+            f"start=({pose['x']:.3f}, {pose['y']:.3f}), "
+            f"goal=({pose_command['x']:.3f}, {pose_command['y']:.3f}), "
+            f"length={length_m:.3f} m."
+        )
+        return True
+
+    def nominal_path_projection(self, pose=None, update_progress=False):
+        if (
+            self.nominal_path_start is None
+            or self.nominal_path_axis is None
+            or self.nominal_path_length_m is None
+        ):
+            return None
+        if pose is None:
+            pose = self.current_pose()
+        if pose is None:
+            return None
+
+        dx = pose["x"] - self.nominal_path_start["x"]
+        dy = pose["y"] - self.nominal_path_start["y"]
+        measured_progress_m = (
+            dx * self.nominal_path_axis[0]
+            + dy * self.nominal_path_axis[1]
+        )
+        measured_progress_m = min(
+            self.nominal_path_length_m,
+            max(0.0, measured_progress_m),
+        )
+        if update_progress:
+            self.nominal_path_max_progress_m = max(
+                self.nominal_path_max_progress_m,
+                measured_progress_m,
+            )
+        progress_m = max(
+            self.nominal_path_max_progress_m,
+            measured_progress_m,
+        )
+
+        path_x = (
+            self.nominal_path_start["x"]
+            + progress_m * self.nominal_path_axis[0]
+        )
+        path_y = (
+            self.nominal_path_start["y"]
+            + progress_m * self.nominal_path_axis[1]
+        )
+        offset_m = math.hypot(pose["x"] - path_x, pose["y"] - path_y)
+        return {
+            "measured_progress_m": measured_progress_m,
+            "progress_m": progress_m,
+            "path_x": path_x,
+            "path_y": path_y,
+            "offset_m": offset_m,
+        }
+
+    def nominal_path_summary(self):
+        projection = self.nominal_path_projection()
+        return {
+            "start": self.nominal_path_start,
+            "goal": self.nominal_path_goal,
+            "length_m": self.nominal_path_length_m,
+            "maximum_progress_m": self.nominal_path_max_progress_m,
+            "projection": projection,
+        }
+
     def remember_current_target(self):
         if not self.esp_data:
             self.saved_target = None
@@ -1109,6 +1355,26 @@ class ObstacleDecisionNode(Node):
             }
         except (KeyError, TypeError, ValueError):
             self.saved_target = None
+
+    def esp_has_target(self, target):
+        if target is None or not self.esp_data:
+            return False
+
+        esp_target = self.esp_data.get("target", {})
+        try:
+            position_error = math.hypot(
+                float(esp_target["x"]) - target["x"],
+                float(esp_target["y"]) - target["y"],
+            )
+            yaw_error = abs(
+                self.wrap_deg(
+                    float(esp_target["yaw"]) - target["yaw"]
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+        return position_error <= 0.01 and yaw_error <= 1.0
 
     def pose_reached(self, waypoint):
         pose = self.current_pose()
@@ -1197,26 +1463,10 @@ class ObstacleDecisionNode(Node):
         self.publish_pose_target(target)
 
     def esp_has_avoidance_target(self):
-        if self.avoidance_target is None or not self.esp_data:
-            return False
-        if not bool(self.esp_data.get("poseMode", False)):
-            return False
-
-        target = self.esp_data.get("target", {})
-        try:
-            position_error = math.hypot(
-                float(target["x"]) - self.avoidance_target["x"],
-                float(target["y"]) - self.avoidance_target["y"],
-            )
-            yaw_error = abs(
-                self.wrap_deg(
-                    float(target["yaw"]) - self.avoidance_target["yaw"]
-                )
-            )
-        except (KeyError, TypeError, ValueError):
-            return False
-
-        return position_error <= 0.01 and yaw_error <= 1.0
+        return (
+            bool(self.esp_data and self.esp_data.get("poseMode", False))
+            and self.esp_has_target(self.avoidance_target)
+        )
 
     def ensure_avoidance_target_active(self):
         if self.avoidance_target is None:
@@ -1263,6 +1513,7 @@ class ObstacleDecisionNode(Node):
         return True
 
     def reset_avoidance(self):
+        self.primary_travel_direction = "front"
         self.avoidance_side = None
         self.side_obstacle_direction = None
         self.longitudinal_detour_direction = None
@@ -1282,6 +1533,7 @@ class ObstacleDecisionNode(Node):
         self.avoidance_pause_state = None
         self.avoidance_pause_sensor = None
         self.avoidance_pause_started_s = None
+        self.avoidance_pause_obstacle_direction = None
         self.last_avoidance_command_s = None
         self.reset_edge_detector(self.front_edge_detector)
         self.reset_edge_detector(self.rear_edge_detector)
@@ -1473,10 +1725,19 @@ class ObstacleDecisionNode(Node):
 
     def abort_avoidance(self, reason):
         self.avoidance_abort_reason = reason
+        self.status_reason = f"avoidance_stopped_{reason}"
+        self.status_reason_state = "AVOIDANCE_ABORTED"
+        self.get_logger().error(
+            f"AVOIDANCE STOPPED | reason={reason}, "
+            f"state={self.state}, target={self.avoidance_target}, "
+            f"front={self.front_distance()}, "
+            f"back={self.distance('back_center')}, "
+            f"left={self.distance('left')}, right={self.distance('right')}"
+        )
         self.publish_stop(f"avoidance_aborted_{reason}", force=True)
         self.state = "AVOIDANCE_ABORTED"
 
-    def start_static_avoidance(self, side):
+    def start_static_avoidance(self, side, travel_direction="front"):
         pose = self.current_pose()
         side_distance_cm = self.distance(side)
         if not self.saved_pose_mode or self.saved_target is None:
@@ -1484,10 +1745,17 @@ class ObstacleDecisionNode(Node):
             return
         if (
             pose is None
+            or travel_direction not in ("front", "back")
+            or side in self.forbidden_detour_directions
             or side_distance_cm is None
             or not self.esp_stream_recent_for_transition()
         ):
-            self.abort_avoidance("missing_pose_or_side_data")
+            reason = (
+                "chosen_side_points_toward_previous_obstacle"
+                if side in self.forbidden_detour_directions
+                else "missing_pose_or_side_data"
+            )
+            self.abort_avoidance(reason)
             return
 
         if side_distance_cm <= self.avoidance_side_limit_cm:
@@ -1498,6 +1766,7 @@ class ObstacleDecisionNode(Node):
         self.avoidance_origin = dict(pose)
         self.avoidance_forward_axis = (math.cos(yaw_rad), math.sin(yaw_rad))
         self.avoidance_left_axis = (-math.sin(yaw_rad), math.cos(yaw_rad))
+        self.primary_travel_direction = travel_direction
         self.avoidance_side = side
         self.avoidance_lateral_limit_m = self.maximum_lateral_search_m
         self.avoidance_abort_reason = None
@@ -1524,7 +1793,10 @@ class ObstacleDecisionNode(Node):
     def start_lateral_edge_search_stage(self):
         self.reset_edge_detector(
             self.front_edge_detector,
-            self.raw_distance("front_center"),
+            self.direction_distance(
+                self.primary_travel_direction,
+                raw=True,
+            ),
         )
         side_sign = 1.0 if self.avoidance_side == "left" else -1.0
         target = self.make_avoidance_target(
@@ -1702,9 +1974,15 @@ class ObstacleDecisionNode(Node):
             self.raw_distance(self.inner_obstacle_sensor()),
         )
         target = self.make_avoidance_target(
-            forward_m + self.maximum_forward_search_m,
+            forward_m
+            + (
+                1.0
+                if self.primary_travel_direction == "front"
+                else -1.0
+            )
+            * self.maximum_forward_search_m,
             self.avoidance_final_lateral_m,
-            "forward_find_rear_edge",
+            f"{self.primary_travel_direction}_find_rear_edge",
         )
         self.start_avoidance_stage("STATIC_FORWARD_FIND_EDGE", target)
 
@@ -1715,10 +1993,13 @@ class ObstacleDecisionNode(Node):
             return
 
         forward_m, _ = coordinates
+        travel_sign = (
+            1.0 if self.primary_travel_direction == "front" else -1.0
+        )
         target = self.make_avoidance_target(
-            forward_m + self.forward_body_margin_m,
+            forward_m + travel_sign * self.forward_body_margin_m,
             self.avoidance_final_lateral_m,
-            "forward_body_margin",
+            f"{self.primary_travel_direction}_body_margin",
         )
         self.start_avoidance_stage("STATIC_FORWARD_MARGIN", target)
 
@@ -1756,10 +2037,16 @@ class ObstacleDecisionNode(Node):
             pose is None
             or obstacle_direction not in ("left", "right")
             or detour_direction not in ("front", "back")
+            or detour_direction in self.forbidden_detour_directions
             or detour_distance_cm is None
             or not self.esp_stream_recent_for_transition()
         ):
-            self.abort_avoidance("missing_pose_or_detour_data")
+            reason = (
+                "chosen_detour_points_toward_previous_obstacle"
+                if detour_direction in self.forbidden_detour_directions
+                else "missing_pose_or_detour_data"
+            )
+            self.abort_avoidance(reason)
             return
         if detour_distance_cm <= self.avoidance_side_limit_cm:
             self.abort_avoidance(
@@ -1973,6 +2260,8 @@ class ObstacleDecisionNode(Node):
 
     def resume_original_target(self):
         if self.resume_saved_target and self.saved_pose_mode and self.saved_target:
+            self.original_target_resume_pending = True
+            self.last_original_target_resume_command_s = self.now_s()
             self.publish_command(
                 {
                     "type": "pose",
@@ -1982,6 +2271,169 @@ class ObstacleDecisionNode(Node):
                     "reason": "resume_saved_target",
                 }
             )
+            self.get_logger().warn(
+                "Restoring original destination and waiting for ESP "
+                "confirmation: "
+                f"x={self.saved_target['x']:.3f}, "
+                f"y={self.saved_target['y']:.3f}, "
+                f"yaw={self.saved_target['yaw']:.1f}."
+            )
+            return True
+        return False
+
+    def ensure_original_target_resumed(self):
+        if not self.original_target_resume_pending:
+            return
+        if self.saved_target is None:
+            self.original_target_resume_pending = False
+            self.last_original_target_resume_command_s = None
+            return
+
+        if (
+            self.esp_has_target(self.saved_target)
+            and (
+                bool(self.esp_data.get("poseMode", False))
+                or self.pose_reached(self.saved_target)
+            )
+        ):
+            self.original_target_resume_pending = False
+            self.last_original_target_resume_command_s = None
+            self.get_logger().warn(
+                "ESP confirmed original destination: "
+                f"x={self.saved_target['x']:.3f}, "
+                f"y={self.saved_target['y']:.3f}, "
+                f"yaw={self.saved_target['yaw']:.1f}."
+            )
+            return
+
+        now = self.now_s()
+        if (
+            self.last_original_target_resume_command_s is None
+            or now - self.last_original_target_resume_command_s
+            >= self.avoidance_command_retry_s
+        ):
+            self.last_original_target_resume_command_s = now
+            self.get_logger().warn(
+                "Original destination not yet confirmed by ESP; retrying."
+            )
+            self.publish_command(
+                {
+                    "type": "pose",
+                    "x": self.saved_target["x"],
+                    "y": self.saved_target["y"],
+                    "yaw": self.saved_target["yaw"],
+                    "reason": "retry_resume_saved_target",
+                }
+            )
+
+    def start_nominal_path_rejoin(self):
+        pose = self.current_pose()
+        projection = self.nominal_path_projection(pose)
+        if pose is None or projection is None:
+            self.abort_avoidance("missing_nominal_path_for_rejoin")
+            return
+
+        if projection["offset_m"] <= self.pose_tolerance_m:
+            if self.forbidden_detour_directions:
+                self.get_logger().warn(
+                    "Navigation line recovered; clearing previous-obstacle "
+                    "direction locks="
+                    f"{sorted(self.forbidden_detour_directions)}."
+                )
+                self.forbidden_detour_directions.clear()
+            self.rejoin_nominal_after_avoidance = False
+            self.resume_original_target()
+            self.state = "CLEAR"
+            self.blocked_since = None
+            self.reset_avoidance()
+            return
+
+        rejoin_target = {
+            "type": "pose",
+            "x": projection["path_x"],
+            "y": projection["path_y"],
+            "yaw": pose["yaw"],
+            "segment": "rejoin_closest_forward_nominal_path_point",
+        }
+        self.reset_avoidance()
+        self.rejoin_nominal_after_avoidance = True
+        self.get_logger().warn(
+            "Rejoining nominal navigation path without losing progress: "
+            f"progress={projection['progress_m']:.3f} m, "
+            f"offset={projection['offset_m']:.3f} m, "
+            f"target=({projection['path_x']:.3f}, "
+            f"{projection['path_y']:.3f})."
+        )
+        self.start_avoidance_stage("STATIC_NOMINAL_REJOIN", rejoin_target)
+
+    def complete_current_avoidance(self):
+        if self.rejoin_nominal_after_avoidance:
+            self.start_nominal_path_rejoin()
+            return
+
+        self.resume_original_target()
+        self.state = "CLEAR"
+        self.blocked_since = None
+        self.reset_avoidance()
+
+    def replan_for_persistent_obstacle(self, direction):
+        if direction not in ("front", "back", "left", "right"):
+            self.abort_avoidance("invalid_static_replan_direction")
+            return
+        if self.static_replan_count >= self.max_static_replans:
+            self.abort_avoidance("maximum_static_replans_reached")
+            return
+        if (
+            self.nominal_path_axis is None
+            or self.nominal_path_goal is None
+            or self.saved_target is None
+        ):
+            self.abort_avoidance("nominal_path_not_available_for_replan")
+            return
+
+        previous_obstacle_direction = (
+            self.avoidance_pause_obstacle_direction
+        )
+        if previous_obstacle_direction is not None:
+            self.forbidden_detour_directions.add(
+                previous_obstacle_direction
+            )
+            self.get_logger().warn(
+                "Locked previous obstacle direction="
+                f"{previous_obstacle_direction}; the new avoidance will not "
+                "choose a detour back toward that obstacle. "
+                "Active direction locks="
+                f"{sorted(self.forbidden_detour_directions)}."
+            )
+
+        self.static_replan_count += 1
+        self.rejoin_nominal_after_avoidance = True
+        self.get_logger().warn(
+            "Second static obstacle confirmed during avoidance. "
+            f"Replanning from current pose for blocked direction={direction}; "
+            f"replan={self.static_replan_count}/{self.max_static_replans}."
+        )
+
+        self.reset_avoidance()
+        self.rejoin_nominal_after_avoidance = True
+
+        if direction in ("front", "back"):
+            side = self.choose_avoidance_side()
+            if side is None:
+                self.abort_avoidance(
+                    "no_safe_side_away_from_previous_obstacle"
+                )
+                return
+            self.start_static_avoidance(side, direction)
+            return
+
+        detour_direction = self.choose_longitudinal_avoidance_direction()
+        if detour_direction is None:
+            self.abort_avoidance(
+                "no_safe_front_or_back_away_from_previous_obstacle"
+            )
+            return
+        self.start_side_static_avoidance(direction, detour_direction)
 
     def evaluate(self):
         extra = {}
@@ -2025,6 +2477,8 @@ class ObstacleDecisionNode(Node):
             self.blocked_since = None
             self.safety_hazard_sensor = None
             extra["reason"] = "sensor_stream_recovered_reset_required"
+
+        self.ensure_original_target_resumed()
 
         if self.state == "RESETTING":
             self.publish_stop("resetting_waiting_for_robot_stop")
@@ -2089,9 +2543,16 @@ class ObstacleDecisionNode(Node):
 
         elif self.state == "STATIC_STRAFE_FIND_EDGE":
             if self.check_avoidance_motion_health():
+                travel_distance = self.direction_distance(
+                    self.primary_travel_direction
+                )
+                travel_clear_threshold = self.direction_clear_threshold(
+                    self.primary_travel_direction
+                )
                 if self.front_edge_detector["detected"]:
                     self.get_logger().warn(
-                        "Fast front edge transition confirmed: "
+                        "Fast primary-direction edge transition confirmed: "
+                        f"sensor={self.primary_travel_direction}, "
                         f"near={self.front_edge_detector['near_cm']} cm, "
                         f"far={self.front_edge_detector['far_cm']} cm, "
                         f"samples={self.front_edge_detector['candidate_count']}."
@@ -2102,11 +2563,15 @@ class ObstacleDecisionNode(Node):
                     ):
                         self.start_lateral_margin_stage()
                 elif self.condition_confirmed(
-                    self.is_front_clear(),
+                    (
+                        travel_distance is not None
+                        and travel_clear_threshold is not None
+                        and travel_distance >= travel_clear_threshold
+                    ),
                     self.front_clear_confirm_s,
                 ):
                     self.get_logger().warn(
-                        "Front edge transition was not sharp enough; "
+                        "Primary-direction edge transition was not sharp enough; "
                         "using the slower filtered-clear fallback."
                     )
                     if not self.pause_for_measurement(
@@ -2233,10 +2698,7 @@ class ObstacleDecisionNode(Node):
             if self.check_avoidance_motion_health() and self.pose_reached(
                 self.avoidance_target
             ):
-                self.resume_original_target()
-                self.state = "CLEAR"
-                self.blocked_since = None
-                self.reset_avoidance()
+                self.complete_current_avoidance()
 
         elif self.state == "STATIC_SIDE_LONGITUDINAL_FIND_EDGE":
             if self.check_avoidance_motion_health():
@@ -2357,6 +2819,20 @@ class ObstacleDecisionNode(Node):
             if self.check_avoidance_motion_health() and self.pose_reached(
                 self.avoidance_target
             ):
+                self.complete_current_avoidance()
+
+        elif self.state == "STATIC_NOMINAL_REJOIN":
+            if self.check_avoidance_motion_health() and self.pose_reached(
+                self.avoidance_target
+            ):
+                if self.forbidden_detour_directions:
+                    self.get_logger().warn(
+                        "Navigation line recovered; clearing "
+                        "previous-obstacle direction locks="
+                        f"{sorted(self.forbidden_detour_directions)}."
+                    )
+                    self.forbidden_detour_directions.clear()
+                self.rejoin_nominal_after_avoidance = False
                 self.resume_original_target()
                 self.state = "CLEAR"
                 self.blocked_since = None
@@ -2366,14 +2842,22 @@ class ObstacleDecisionNode(Node):
             self.publish_stop(
                 f"avoidance_paused_{self.avoidance_pause_sensor}"
             )
+            pause_cleared = self.avoidance_pause_release()
             if (
                 self.avoidance_pause_timeout_s > 0.0
                 and self.now_s() - self.avoidance_pause_started_s
                 > self.avoidance_pause_timeout_s
             ):
                 self.abort_avoidance("pause_timeout")
+            elif (
+                not pause_cleared
+                and self.now_s() - self.avoidance_pause_started_s
+                >= self.static_wait_s
+            ):
+                blocked_direction = self.avoidance_pause_sensor
+                self.replan_for_persistent_obstacle(blocked_direction)
             elif self.condition_confirmed(
-                self.avoidance_pause_release(),
+                pause_cleared,
                 self.safety_release_confirm_s,
             ):
                 resume_state = self.avoidance_pause_state
@@ -2386,6 +2870,7 @@ class ObstacleDecisionNode(Node):
                 self.avoidance_pause_state = None
                 self.avoidance_pause_sensor = None
                 self.avoidance_pause_started_s = None
+                self.avoidance_pause_obstacle_direction = None
                 if self.avoidance_target is None:
                     self.abort_avoidance("missing_target_after_pause")
                 else:
