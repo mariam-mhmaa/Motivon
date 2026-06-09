@@ -1,17 +1,16 @@
 """
 Face Recognition System - Step 6: Real-Time Camera Testing
-Test face recognition on Raspberry Pi Camera V2 RAW TCP stream.
+Test face recognition on Raspberry Pi Camera V2 via MJPEG TCP stream.
 
 Run this file on the laptop.
 
-Before running this file, run this on the Raspberry Pi:
+Before running this file, start the camera server on the Raspberry Pi:
+    python camera.py server
 
-pkill -f rpicam
-pkill -f ffmpeg
+Or run the equivalent command:
+    rpicam-vid -t 0 -n --width 240 --height 180 --framerate 8 --codec mjpeg -o - | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -f mjpeg -i pipe:0 -c:v mjpeg -q:v 8 -f mjpeg "tcp://0.0.0.0:8888?listen=1"
 
-rpicam-vid -t 0 -n --width 320 --height 240 --framerate 10 --codec yuv420 -o - | ffmpeg -f rawvideo -pix_fmt yuv420p -s:v 320x240 -r 10 -i - -pix_fmt bgr24 -f rawvideo "tcp://0.0.0.0:8888?listen=1"
-
-This sends fixed-size raw BGR frames: 320 * 240 * 3 bytes per frame.
+This sends MJPEG-encoded frames over TCP with reliable frame parsing.
 """
 
 import cv2
@@ -21,17 +20,17 @@ import json
 from datetime import datetime
 from pathlib import Path
 from collections import deque
-import socket
+from camera import get_client_camera
 
 
 # =========================
-# RAW TCP CAMERA CONFIG
+# CAMERA CONFIG
 # =========================
-PI_CAMERA_HOST = "172.20.10.2"
+PI_CAMERA_HOST = "192.168.1.200"  # Change to your Raspberry Pi IP address
 PI_CAMERA_PORT = 8888
-RAW_FRAME_WIDTH = 320
-RAW_FRAME_HEIGHT = 240
-PI_CAMERA_STREAM_URL = f"tcp://{PI_CAMERA_HOST}:{PI_CAMERA_PORT}"
+CAMERA_WIDTH = 240
+CAMERA_HEIGHT = 180
+CAMERA_FRAMERATE = 8
 
 PROCESS_EVERY_N_FRAMES = 2  # 2 = process every second frame, reducing recognition lag.
 DISPLAY_WIDTH = 640         # Resize only for laptop display.
@@ -67,70 +66,7 @@ def compute_lbp_histogram(gray):
     return np.array(features, dtype=np.float32)
 
 
-class RawTCPFrameReader:
-    """
-    MJPEG-over-TCP frame reader.
 
-    It keeps the same class name as before so the rest of your code does not need to change.
-    Instead of assuming fixed-size raw frames, it searches for JPEG start/end markers:
-    JPEG start = FF D8
-    JPEG end   = FF D9
-    """
-
-    def __init__(self, host="172.20.10.2", port=8888, width=320, height=240):
-        self.host = host
-        self.port = port
-        self.width = width
-        self.height = height
-        self.sock = None
-        self.buffer = bytearray()
-
-    def open(self):
-        print(f"Connecting to MJPEG TCP camera stream at {self.host}:{self.port}...")
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.settimeout(10)
-        self.sock.connect((self.host, self.port))
-        self.sock.settimeout(3)
-        print("✓ MJPEG TCP camera stream opened")
-        return True
-
-    def read(self):
-        while True:
-            start = self.buffer.find(b"\xff\xd8")
-            end = self.buffer.find(b"\xff\xd9")
-
-            if start != -1 and end != -1 and end > start:
-                jpg = bytes(self.buffer[start:end + 2])
-                del self.buffer[:end + 2]
-
-                img_array = np.frombuffer(jpg, dtype=np.uint8)
-                frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-
-                if frame is None:
-                    continue
-
-                return True, frame
-
-            try:
-                packet = self.sock.recv(4096)
-            except socket.timeout:
-                return False, None
-
-            if not packet:
-                return False, None
-
-            self.buffer.extend(packet)
-
-            # Prevent unlimited memory growth if something goes wrong.
-            if len(self.buffer) > 2_000_000:
-                self.buffer = self.buffer[-500_000:]
-
-    def release(self):
-        if self.sock is not None:
-            try:
-                self.sock.close()
-            finally:
-                self.sock = None
 
 class FaceRecognitionSystem:
     def __init__(
@@ -848,11 +784,16 @@ class FaceRecognitionSystem:
 
         return frame
 
-    def run_camera(self, camera_source=PI_CAMERA_STREAM_URL):
-        """Run real-time face recognition on Raspberry Pi RAW TCP camera stream."""
+    def run_camera(self, host=None, port=None):
+        """Run real-time face recognition on Raspberry Pi camera stream."""
+        
+        if host is None:
+            host = PI_CAMERA_HOST
+        if port is None:
+            port = PI_CAMERA_PORT
 
         print("=" * 70)
-        print("FACE RECOGNITION SYSTEM - RASPBERRY PI CAMERA RAW TCP STREAM")
+        print("FACE RECOGNITION SYSTEM - RASPBERRY PI CAMERA MJPEG STREAM")
         print("=" * 70)
         print("\nControls:")
         print("  SPACE - Toggle smoothing ON/OFF")
@@ -860,16 +801,18 @@ class FaceRecognitionSystem:
         print("  S     - Save detection log")
         print("  Q     - Quit")
         print("\nStarting Raspberry Pi camera stream...")
-        print(f"Camera source: {camera_source}")
-        print("\nMake sure this is running on the Pi first:")
-        print('rpicam-vid -t 0 -n --width 320 --height 240 --framerate 10 --codec yuv420 -o - | ffmpeg -f rawvideo -pix_fmt yuv420p -s:v 320x240 -r 10 -i - -pix_fmt bgr24 -f rawvideo "tcp://0.0.0.0:8888?listen=1"')
+        print(f"Connecting to: {host}:{port}")
+        print("\nMake sure the camera server is running on the Pi first:")
+        print("  python camera.py server")
         print("-" * 70 + "\n")
 
-        cap = RawTCPFrameReader(
-            host=PI_CAMERA_HOST,
-            port=PI_CAMERA_PORT,
-            width=RAW_FRAME_WIDTH,
-            height=RAW_FRAME_HEIGHT,
+        # Create camera client
+        cap = get_client_camera(
+            host=host,
+            port=port,
+            width=CAMERA_WIDTH,
+            height=CAMERA_HEIGHT,
+            framerate=CAMERA_FRAMERATE,
         )
 
         try:
@@ -889,7 +832,7 @@ class FaceRecognitionSystem:
         last_raw_person_name = None
         last_raw_confidence = 0.0
         last_raw_is_unknown = True
-        stream_mode = "320x240 @ 10 fps raw BGR"
+        stream_mode = f"{CAMERA_WIDTH}x{CAMERA_HEIGHT} @ {CAMERA_FRAMERATE} fps MJPEG"
 
         try:
             while True:
@@ -1039,7 +982,7 @@ def main():
         use_known_detector=False,
     )
 
-    system.run_camera(camera_source=PI_CAMERA_STREAM_URL)
+    system.run_camera(host=PI_CAMERA_HOST, port=PI_CAMERA_PORT)
 
 
 if __name__ == "__main__":
