@@ -1,0 +1,16 @@
+{
+  "requirement": "Minimum 100 custom images",
+  "status": "PASSED",
+  "total_images": 2361,
+  "required_images": 100,
+  "classes": {
+    "Ainour": 508,
+    "Mariam": 603,
+    "Nour": 510,
+    "Zeina": 740
+  },
+  "image_formats": {
+    ".jpeg": 537,
+    ".jpg": 1824
+  }
+}
