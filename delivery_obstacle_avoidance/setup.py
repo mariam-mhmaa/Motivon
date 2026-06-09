@@ -25,6 +25,7 @@ setup(
             "ultrasonic_scan_node = delivery_obstacle_avoidance.ultrasonic_scan_node:main",
             "obstacle_decision_node = delivery_obstacle_avoidance.obstacle_decision_node:main",
             "esp_http_bridge_node = delivery_obstacle_avoidance.esp_http_bridge_node:main",
+            "front_servo_calibration_node = delivery_obstacle_avoidance.front_servo_calibration_node:main",
         ],
     },
 )

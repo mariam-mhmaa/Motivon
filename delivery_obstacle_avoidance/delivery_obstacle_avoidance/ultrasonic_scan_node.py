@@ -6,6 +6,7 @@ from collections import deque
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile
 from std_msgs.msg import String
 
 try:
@@ -85,14 +86,16 @@ class UltrasonicScanNode(Node):
         self.declare_parameter("servo_center_us", 1500)
         self.declare_parameter("servo_plus_45_us", 1750)
         self.declare_parameter("servo_minus_45_us", 1250)
-        self.declare_parameter("scan_period_s", 0.80)
+        self.declare_parameter("scan_period_s", 0.08)
         self.declare_parameter("servo_settle_s", 0.30)
         self.declare_parameter("servo_step_us", 10)
+        self.declare_parameter("enable_servo_output", False)
         self.declare_parameter("enable_servo_scan", False)
         self.declare_parameter("print_readings", True)
         self.declare_parameter("print_period_s", 0.50)
         self.declare_parameter("echo_timeout_s", 0.04)
         self.declare_parameter("filter_window", 5)
+        self.declare_parameter("reading_expiry_s", 0.50)
 
         self.trigger_pin = int(self.get_parameter("trigger_pin").value)
         self.echo_pins = {
@@ -108,11 +111,13 @@ class UltrasonicScanNode(Node):
         self.servo_minus_45_us = int(self.get_parameter("servo_minus_45_us").value)
         self.servo_settle_s = float(self.get_parameter("servo_settle_s").value)
         self.servo_step_us = int(self.get_parameter("servo_step_us").value)
+        self.enable_servo_output = bool(self.get_parameter("enable_servo_output").value)
         self.enable_servo_scan = bool(self.get_parameter("enable_servo_scan").value)
         self.print_readings = bool(self.get_parameter("print_readings").value)
         self.print_period_s = float(self.get_parameter("print_period_s").value)
         self.echo_timeout_s = float(self.get_parameter("echo_timeout_s").value)
         self.filter_window = int(self.get_parameter("filter_window").value)
+        self.reading_expiry_s = float(self.get_parameter("reading_expiry_s").value)
         self.last_print_s = 0.0
 
         self.scan_positions = [
@@ -123,9 +128,11 @@ class UltrasonicScanNode(Node):
         self.scan_index = 0
         self.samples = {}
         self.filters = {}
+        self.filter_last_valid_s = {}
 
-        self.scan_pub = self.create_publisher(String, "/obstacle/scan", 10)
-        self.raw_pub = self.create_publisher(String, "/obstacle/raw_scan", 10)
+        sensor_qos = QoSProfile(depth=1)
+        self.scan_pub = self.create_publisher(String, "/obstacle/scan", sensor_qos)
+        self.raw_pub = self.create_publisher(String, "/obstacle/raw_scan", sensor_qos)
 
         if lgpio is None:
             raise RuntimeError("lgpio is not installed. Run this node on the Raspberry Pi.")
@@ -133,54 +140,84 @@ class UltrasonicScanNode(Node):
         chip = int(self.get_parameter("gpio_chip").value)
         self.gpio_handle = lgpio.gpiochip_open(chip)
         lgpio.gpio_claim_output(self.gpio_handle, self.trigger_pin, 0)
-        lgpio.gpio_claim_output(self.gpio_handle, self.front_servo_pin, 0)
-        lgpio.gpio_claim_output(self.gpio_handle, self.back_servo_pin, 0)
         for pin in self.echo_pins.values():
             lgpio.gpio_claim_input(self.gpio_handle, pin)
 
-        self.servo_thread = ServoPulseThread(
-            self.gpio_handle,
-            self.front_servo_pin,
-            self.back_servo_pin,
-            self.servo_center_us,
-            self.servo_center_us,
-            self.servo_step_us,
-        )
-        self.servo_thread.start()
+        if self.enable_servo_output:
+            lgpio.gpio_claim_output(self.gpio_handle, self.front_servo_pin, 0)
+            lgpio.gpio_claim_output(self.gpio_handle, self.back_servo_pin, 0)
+            self.servo_thread = ServoPulseThread(
+                self.gpio_handle,
+                self.front_servo_pin,
+                self.back_servo_pin,
+                self.servo_center_us,
+                self.servo_center_us,
+                self.servo_step_us,
+            )
+            self.servo_thread.start()
+        else:
+            self.get_logger().info(
+                "Servo output disabled; position front/back sensors manually at center."
+            )
+
+        if self.enable_servo_scan and not self.enable_servo_output:
+            self.get_logger().warning(
+                "Servo scanning requested while servo output is disabled; using center readings."
+            )
 
         scan_period_s = float(self.get_parameter("scan_period_s").value)
         self.create_timer(scan_period_s, self.scan_once)
         self.get_logger().info("Ultrasonic scanner started.")
 
-    def read_ultrasonic_cm(self, echo_pin):
+    def wait_for_echoes_low(self):
+        timeout_at = time.monotonic() + 0.005
+        while time.monotonic() < timeout_at:
+            if all(
+                lgpio.gpio_read(self.gpio_handle, pin) == 0
+                for pin in self.echo_pins.values()
+            ):
+                return True
+        return False
+
+    def read_all_ultrasonic_cm(self):
+        if not self.wait_for_echoes_low():
+            return {name: None for name in self.echo_pins}
+
         lgpio.gpio_write(self.gpio_handle, self.trigger_pin, 0)
         time.sleep(0.000002)
         lgpio.gpio_write(self.gpio_handle, self.trigger_pin, 1)
         time.sleep(0.000010)
         lgpio.gpio_write(self.gpio_handle, self.trigger_pin, 0)
 
+        started_at = {name: None for name in self.echo_pins}
+        distances = {name: None for name in self.echo_pins}
+        pending = set(self.echo_pins)
         timeout_at = time.monotonic() + self.echo_timeout_s
-        while lgpio.gpio_read(self.gpio_handle, echo_pin) == 0:
-            if time.monotonic() > timeout_at:
-                return None
+        while pending and time.monotonic() <= timeout_at:
+            now = time.monotonic()
+            for name in tuple(pending):
+                level = lgpio.gpio_read(self.gpio_handle, self.echo_pins[name])
+                if started_at[name] is None:
+                    if level == 1:
+                        started_at[name] = now
+                elif level == 0:
+                    distances[name] = ((now - started_at[name]) * 34300.0) / 2.0
+                    pending.remove(name)
 
-        start = time.monotonic()
-        timeout_at = time.monotonic() + self.echo_timeout_s
-        while lgpio.gpio_read(self.gpio_handle, echo_pin) == 1:
-            if time.monotonic() > timeout_at:
-                return None
-
-        end = time.monotonic()
-        return ((end - start) * 34300.0) / 2.0
+        return distances
 
     def filtered_value(self, key, value):
         if key not in self.filters:
             self.filters[key] = deque(maxlen=self.filter_window)
 
+        now = time.monotonic()
         if value is not None:
             self.filters[key].append(float(value))
+            self.filter_last_valid_s[key] = now
 
-        if not self.filters[key]:
+        last_valid_s = self.filter_last_valid_s.get(key)
+        if last_valid_s is None or now - last_valid_s > self.reading_expiry_s:
+            self.filters[key].clear()
             return None
 
         return statistics.median(self.filters[key])
@@ -189,7 +226,7 @@ class UltrasonicScanNode(Node):
         self.samples[key] = self.filtered_value(key, value)
 
     def scan_once(self):
-        if self.enable_servo_scan:
+        if self.enable_servo_scan and self.enable_servo_output:
             front_label, front_pulse = self.scan_positions[self.scan_index]
             back_label, back_pulse = self.scan_positions[self.scan_index]
             self.scan_index = (self.scan_index + 1) % len(self.scan_positions)
@@ -199,23 +236,24 @@ class UltrasonicScanNode(Node):
             front_pulse = self.servo_center_us
             back_pulse = self.servo_center_us
 
-        self.servo_thread.set_pulses(front_pulse, back_pulse)
-        time.sleep(self.servo_settle_s)
+        if self.enable_servo_output:
+            self.servo_thread.set_pulses(front_pulse, back_pulse)
+            time.sleep(self.servo_settle_s)
 
-        raw = {}
-        raw["left"] = self.read_ultrasonic_cm(self.echo_pins["left"])
-        time.sleep(0.030)
-        raw["right"] = self.read_ultrasonic_cm(self.echo_pins["right"])
-        time.sleep(0.030)
-        raw[f"front_{front_label}"] = self.read_ultrasonic_cm(self.echo_pins["front"])
-        time.sleep(0.030)
-        raw[f"back_{back_label}"] = self.read_ultrasonic_cm(self.echo_pins["back"])
+        measured = self.read_all_ultrasonic_cm()
+        raw = {
+            "left": measured["left"],
+            "right": measured["right"],
+            f"front_{front_label}": measured["front"],
+            f"back_{back_label}": measured["back"],
+        }
 
         for key, value in raw.items():
             self.update_sample(key, value)
 
+        stamp = self.get_clock().now().nanoseconds / 1_000_000_000.0
         payload = {
-            "stamp": self.get_clock().now().nanoseconds / 1_000_000_000.0,
+            "stamp": stamp,
             "active_scan": {
                 "front": front_label,
                 "back": back_label,
@@ -223,13 +261,19 @@ class UltrasonicScanNode(Node):
             "distances_cm": self.samples,
         }
 
+        raw_msg = String()
+        raw_msg.data = json.dumps(
+            {
+                "stamp": stamp,
+                "raw_cm": raw,
+                "active_scan": payload["active_scan"],
+            }
+        )
+        self.raw_pub.publish(raw_msg)
+
         scan_msg = String()
         scan_msg.data = json.dumps(payload)
         self.scan_pub.publish(scan_msg)
-
-        raw_msg = String()
-        raw_msg.data = json.dumps({"raw_cm": raw, "active_scan": payload["active_scan"]})
-        self.raw_pub.publish(raw_msg)
 
         self.print_distances_if_due(payload)
 
@@ -264,8 +308,9 @@ class UltrasonicScanNode(Node):
             self.servo_thread.running = False
             self.servo_thread.join(timeout=0.20)
         if hasattr(self, "gpio_handle"):
-            lgpio.gpio_write(self.gpio_handle, self.front_servo_pin, 0)
-            lgpio.gpio_write(self.gpio_handle, self.back_servo_pin, 0)
+            if self.enable_servo_output:
+                lgpio.gpio_write(self.gpio_handle, self.front_servo_pin, 0)
+                lgpio.gpio_write(self.gpio_handle, self.back_servo_pin, 0)
             lgpio.gpiochip_close(self.gpio_handle)
         super().destroy_node()
 
@@ -275,9 +320,12 @@ def main(args=None):
     node = UltrasonicScanNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
