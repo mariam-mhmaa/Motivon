@@ -37,6 +37,9 @@ class ObstacleDecisionNode(Node):
         self.declare_parameter("avoidance_side_limit_cm", 22.0)
         self.declare_parameter("static_wait_s", 10.0)
         self.declare_parameter("enable_static_avoidance", True)
+        self.declare_parameter("enable_pre_avoidance_servo_validation", True)
+        self.declare_parameter("servo_validation_stop_cm", 20.0)
+        self.declare_parameter("servo_validation_timeout_s", 6.0)
         self.declare_parameter("front_clear_confirm_s", 0.40)
         self.declare_parameter("edge_near_max_cm", 45.0)
         self.declare_parameter("edge_far_min_cm", 60.0)
@@ -93,6 +96,17 @@ class ObstacleDecisionNode(Node):
         self.static_wait_s = float(self.get_parameter("static_wait_s").value)
         self.enable_static_avoidance = bool(
             self.get_parameter("enable_static_avoidance").value
+        )
+        self.enable_pre_avoidance_servo_validation = bool(
+            self.get_parameter(
+                "enable_pre_avoidance_servo_validation"
+            ).value
+        )
+        self.servo_validation_stop_cm = float(
+            self.get_parameter("servo_validation_stop_cm").value
+        )
+        self.servo_validation_timeout_s = float(
+            self.get_parameter("servo_validation_timeout_s").value
         )
         self.front_clear_confirm_s = float(
             self.get_parameter("front_clear_confirm_s").value
@@ -189,6 +203,11 @@ class ObstacleDecisionNode(Node):
 
         self.command_pub = self.create_publisher(String, "/robot/motion_command", 10)
         self.state_pub = self.create_publisher(String, "/obstacle/state", 10)
+        self.front_servo_scan_request_pub = self.create_publisher(
+            String,
+            "/obstacle/front_servo_scan_request",
+            10,
+        )
         self.operator_command_sub = self.create_subscription(
             String,
             "/operator/motion_command",
@@ -203,6 +222,12 @@ class ObstacleDecisionNode(Node):
             String, "/obstacle/raw_scan", self.on_raw_scan, sensor_qos
         )
         self.esp_data_sub = self.create_subscription(String, "/esp/data", self.on_esp_data, 10)
+        self.front_servo_scan_result_sub = self.create_subscription(
+            String,
+            "/obstacle/front_servo_scan_result",
+            self.on_front_servo_scan_result,
+            10,
+        )
 
         self.state = "READY"
         self.distances = {}
@@ -262,6 +287,9 @@ class ObstacleDecisionNode(Node):
         self.last_state_log = None
         self.status_reason = ""
         self.status_reason_state = None
+        self.servo_validation_request_counter = 0
+        self.servo_validation_pending = None
+        self.last_servo_validation = None
 
         period = float(self.get_parameter("decision_period_s").value)
         self.create_timer(period, self.evaluate)
@@ -304,6 +332,7 @@ class ObstacleDecisionNode(Node):
             "CLEAR": "Path clear; normal movement active",
             "WAITING_DYNAMIC": "Obstacle ahead; stopped and waiting for it to move",
             "PERSISTENT_STOPPED": "Obstacle remains; avoidance is disabled",
+            "STATIC_SERVO_VALIDATE_SIDE": "Stopped: front servo is comparing both detour sides",
             "STATIC_STRAFE_FIND_EDGE": "Avoiding: moving sideways to find the obstacle edge",
             "STATIC_STRAFE_MARGIN": "Avoiding: adding sideways body clearance",
             "STATIC_FORWARD_FIND_EDGE": "Avoiding: moving forward past the obstacle",
@@ -596,6 +625,11 @@ class ObstacleDecisionNode(Node):
             "measurement_mode": self.avoidance_measurement_mode,
             "measurement_checkpoint": self.measurement_checkpoint,
             "measurement_checkpoints": self.measurement_checkpoints,
+            "servo_validation_pending": self.servo_validation_pending,
+            "last_servo_validation": self.last_servo_validation,
+            "servo_validation_stop_cm": (
+                self.servo_validation_stop_cm
+            ),
         }
         if self.blocked_since is not None:
             payload["blocked_for_s"] = max(0.0, now - self.blocked_since)
@@ -1177,6 +1211,188 @@ class ObstacleDecisionNode(Node):
             "Choosing left/right avoidance",
         )
 
+    def request_front_servo_validation(self, side):
+        if not self.enable_pre_avoidance_servo_validation:
+            self.get_logger().warn(
+                "Pre-avoidance servo validation disabled; "
+                f"starting with side={side}."
+            )
+            self.start_static_avoidance(side)
+            return
+
+        self.servo_validation_pending = {
+            "initial_side": side,
+            "opposite_side": self.opposite_direction(side),
+            "active_request_id": None,
+            "active_side": None,
+            "started_s": None,
+            "angle_readings_cm": {},
+            "scan_results": {},
+            "selected_side": None,
+            "comparison_complete": False,
+        }
+        self.last_servo_validation = None
+        self.state = "STATIC_SERVO_VALIDATE_SIDE"
+        self.front_clear_since = None
+        self.publish_stop("front_servo_validating_detour_side", force=True)
+        self.publish_front_servo_scan_request(side)
+
+    def publish_front_servo_scan_request(self, side):
+        pending = self.servo_validation_pending
+        if pending is None:
+            return
+
+        self.servo_validation_request_counter += 1
+        request_id = self.servo_validation_request_counter
+        pending["active_request_id"] = request_id
+        pending["active_side"] = side
+        pending["started_s"] = self.now_s()
+        request_msg = String()
+        request_msg.data = json.dumps(
+            {
+                "request_id": request_id,
+                "side": side,
+            }
+        )
+        self.front_servo_scan_request_pub.publish(request_msg)
+        self.get_logger().warn(
+            "Front servo comparison scan requested | "
+            f"request={request_id}, side={side}, "
+            f"fixed_side_distance={self.distance(side)} cm, "
+            f"unsafe_only_at_or_below={self.servo_validation_stop_cm:.1f} cm"
+        )
+
+    def on_front_servo_scan_result(self, msg):
+        try:
+            result = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self.get_logger().warning(
+                "Ignoring malformed /obstacle/front_servo_scan_result JSON."
+            )
+            return
+
+        pending = self.servo_validation_pending
+        if self.state != "STATIC_SERVO_VALIDATE_SIDE" or pending is None:
+            return
+
+        if result.get("request_id") != pending.get("active_request_id"):
+            self.get_logger().warning(
+                "Ignoring stale front servo validation result | "
+                f"pending={pending.get('active_request_id')}, "
+                f"received={result.get('request_id')}"
+            )
+            return
+
+        side = pending["active_side"]
+        median_cm = finite_distance(result.get("median_cm"))
+
+        result_is_valid = (
+            result.get("status") == "complete"
+            and result.get("side") == side
+            and result.get("returned_center") is True
+            and median_cm is not None
+        )
+        if not result_is_valid:
+            reason = result.get("reason", "invalid_front_servo_scan")
+            self.servo_validation_pending = None
+            self.abort_avoidance(f"front_servo_validation_failed_{reason}")
+            self.publish_state({"reason": f"front_servo_validation_failed_{reason}"})
+            return
+
+        pending["angle_readings_cm"][side] = median_cm
+        pending["scan_results"][side] = result
+        opposite = pending["opposite_side"]
+        if opposite not in pending["angle_readings_cm"]:
+            self.get_logger().warn(
+                "Front servo comparison first result | "
+                f"side={side}, median={median_cm:.1f} cm; "
+                f"now scanning {opposite}."
+            )
+            self.publish_front_servo_scan_request(opposite)
+            self.publish_state(
+                {"reason": f"servo_first_side_measured_scanning_{opposite}"}
+            )
+            return
+
+        initial_side = pending["initial_side"]
+        angle_readings = dict(pending["angle_readings_cm"])
+        fixed_readings = {
+            "left": self.distance("left"),
+            "right": self.distance("right"),
+        }
+        valid_sides = {
+            candidate: angle_readings.get(candidate)
+            for candidate in ("left", "right")
+            if candidate not in self.forbidden_detour_directions
+            and angle_readings.get(candidate) is not None
+            and angle_readings[candidate] > self.servo_validation_stop_cm
+            and fixed_readings.get(candidate) is not None
+            and fixed_readings[candidate] > self.avoidance_side_limit_cm
+        }
+        if not valid_sides:
+            self.last_servo_validation = {
+                "initial_side": initial_side,
+                "angle_readings_cm": angle_readings,
+                "fixed_readings_cm": fixed_readings,
+                "scan_results": pending["scan_results"],
+                "stop_threshold_cm": self.servo_validation_stop_cm,
+                "decision": "no_safe_side",
+            }
+            self.servo_validation_pending = None
+            self.abort_avoidance("servo_comparison_found_no_safe_side")
+            self.publish_state({"reason": "servo_comparison_found_no_safe_side"})
+            return
+
+        selected_side = max(valid_sides, key=valid_sides.get)
+        decision = (
+            "keep_initial_side"
+            if selected_side == initial_side
+            else "switch_to_clearer_side"
+        )
+        self.last_servo_validation = {
+            "initial_side": initial_side,
+            "selected_side": selected_side,
+            "angle_readings_cm": angle_readings,
+            "fixed_readings_cm": fixed_readings,
+            "scan_results": pending["scan_results"],
+            "stop_threshold_cm": self.servo_validation_stop_cm,
+            "decision": decision,
+        }
+        pending["selected_side"] = selected_side
+        pending["comparison_complete"] = True
+        pending["completed_s"] = self.now_s()
+        self.get_logger().warn(
+            "FRONT SERVO SIDE COMPARISON COMPLETE | "
+            f"initial={initial_side}, "
+            f"left_angle={angle_readings.get('left'):.1f} cm, "
+            f"right_angle={angle_readings.get('right'):.1f} cm, "
+            f"left_fixed={fixed_readings.get('left')} cm, "
+            f"right_fixed={fixed_readings.get('right')} cm, "
+            f"selected={selected_side}, decision={decision}, "
+            f"stop_limit={self.servo_validation_stop_cm:.1f} cm"
+        )
+        if not self.esp_stream_recent_for_transition():
+            self.status_reason = "servo_comparison_complete_waiting_for_esp"
+            self.status_reason_state = self.state
+            self.get_logger().warn(
+                "Servo comparison is complete, but ESP telemetry is not fresh. "
+                "Robot remains stopped and will start avoidance automatically "
+                "when ESP communication recovers."
+            )
+            self.publish_state(
+                {"reason": "servo_comparison_complete_waiting_for_esp"}
+            )
+            return
+
+        self.servo_validation_pending = None
+        self.start_static_avoidance(selected_side)
+        reason = (
+            self.status_reason
+            if self.state == "AVOIDANCE_ABORTED"
+            else f"servo_comparison_selected_{selected_side}"
+        )
+        self.publish_state({"reason": reason})
+
     def choose_longitudinal_avoidance_direction(self):
         return self.choose_direction_by_clearance(
             {
@@ -1376,6 +1592,20 @@ class ObstacleDecisionNode(Node):
 
         return position_error <= 0.01 and yaw_error <= 1.0
 
+    def esp_finished_target(self, target):
+        if target is None or not self.esp_data:
+            return False
+        if bool(self.esp_data.get("poseMode", False)):
+            return False
+        if not self.esp_has_target(target):
+            return False
+
+        return (
+            abs(self.command_value("vx")) <= self.motion_command_epsilon
+            and abs(self.command_value("vy")) <= self.motion_command_epsilon
+            and abs(self.command_value("wz")) <= self.rotation_command_epsilon
+        )
+
     def pose_reached(self, waypoint):
         pose = self.current_pose()
         if pose is None:
@@ -1513,6 +1743,7 @@ class ObstacleDecisionNode(Node):
         return True
 
     def reset_avoidance(self):
+        self.servo_validation_pending = None
         self.primary_travel_direction = "front"
         self.avoidance_side = None
         self.side_obstacle_direction = None
@@ -2003,7 +2234,24 @@ class ObstacleDecisionNode(Node):
         )
         self.start_avoidance_stage("STATIC_FORWARD_MARGIN", target)
 
+    def standard_return_direction(self):
+        return self.opposite_direction(self.avoidance_side)
+
     def begin_return_wait(self):
+        return_direction = self.standard_return_direction()
+        if (
+            self.rejoin_nominal_after_avoidance
+            and return_direction in self.forbidden_detour_directions
+        ):
+            self.get_logger().warn(
+                "Skipping the interrupted avoidance's local return toward "
+                f"{return_direction}; that direction points back toward the "
+                "previous obstacle. Rejoining the navigation path from the "
+                "current safe position."
+            )
+            self.start_nominal_path_rejoin()
+            return
+
         self.state = "STATIC_RETURN_WAIT_CLEAR"
         self.avoidance_target = None
         self.avoidance_stage_started_s = self.now_s()
@@ -2208,7 +2456,24 @@ class ObstacleDecisionNode(Node):
             target,
         )
 
+    def side_avoidance_return_direction(self):
+        return self.opposite_direction(self.longitudinal_detour_direction)
+
     def begin_side_return_wait(self):
+        return_direction = self.side_avoidance_return_direction()
+        if (
+            self.rejoin_nominal_after_avoidance
+            and return_direction in self.forbidden_detour_directions
+        ):
+            self.get_logger().warn(
+                "Skipping the interrupted side avoidance's local return "
+                f"toward {return_direction}; that direction points back "
+                "toward the previous obstacle. Rejoining the navigation "
+                "path from the current safe position."
+            )
+            self.start_nominal_path_rejoin()
+            return
+
         self.state = "STATIC_SIDE_RETURN_WAIT_CLEAR"
         self.avoidance_target = None
         self.avoidance_stage_started_s = self.now_s()
@@ -2258,10 +2523,12 @@ class ObstacleDecisionNode(Node):
         value = self.raw_distance(key) if key else None
         return value is not None and threshold is not None and value >= threshold
 
-    def resume_original_target(self):
+    def resume_original_target(self, require_confirmation=False):
         if self.resume_saved_target and self.saved_pose_mode and self.saved_target:
-            self.original_target_resume_pending = True
-            self.last_original_target_resume_command_s = self.now_s()
+            self.original_target_resume_pending = require_confirmation
+            self.last_original_target_resume_command_s = (
+                self.now_s() if require_confirmation else None
+            )
             self.publish_command(
                 {
                     "type": "pose",
@@ -2271,9 +2538,13 @@ class ObstacleDecisionNode(Node):
                     "reason": "resume_saved_target",
                 }
             )
+            confirmation_text = (
+                " and waiting for ESP confirmation"
+                if require_confirmation
+                else ""
+            )
             self.get_logger().warn(
-                "Restoring original destination and waiting for ESP "
-                "confirmation: "
+                f"Restoring original destination{confirmation_text}: "
                 f"x={self.saved_target['x']:.3f}, "
                 f"y={self.saved_target['y']:.3f}, "
                 f"yaw={self.saved_target['yaw']:.1f}."
@@ -2342,7 +2613,7 @@ class ObstacleDecisionNode(Node):
                 )
                 self.forbidden_detour_directions.clear()
             self.rejoin_nominal_after_avoidance = False
-            self.resume_original_target()
+            self.resume_original_target(require_confirmation=True)
             self.state = "CLEAR"
             self.blocked_since = None
             self.reset_avoidance()
@@ -2456,6 +2727,13 @@ class ObstacleDecisionNode(Node):
             self.last_esp_data_s is not None
             and not self.esp_stream_fresh()
         ):
+            if self.state == "STATIC_SERVO_VALIDATE_SIDE":
+                self.status_reason = "servo_validation_waiting_for_esp_recovery"
+                self.status_reason_state = self.state
+                self.finish_evaluation(
+                    {"reason": "servo_validation_waiting_for_esp_recovery"}
+                )
+                return
             if self.is_active_avoidance_state() or self.state == "AVOIDANCE_PAUSED":
                 self.abort_avoidance("esp_data_stale")
                 self.finish_evaluation({"reason": "esp_communication_lost"})
@@ -2499,7 +2777,16 @@ class ObstacleDecisionNode(Node):
 
         elif self.state == "WAITING_DYNAMIC":
             self.publish_stop("waiting_dynamic_front_blocked")
-            if self.is_front_clear():
+            front_distance = self.front_distance()
+            front_is_clear = (
+                front_distance is not None
+                and front_distance >= self.front_clear_cm
+            )
+            front_is_still_present = (
+                front_distance is not None
+                and front_distance < self.front_clear_cm
+            )
+            if front_is_clear:
                 if self.front_clear_since is None:
                     self.front_clear_since = self.now_s()
                 elif self.now_s() - self.front_clear_since >= self.front_clear_confirm_s:
@@ -2511,8 +2798,7 @@ class ObstacleDecisionNode(Node):
                 self.front_clear_since = None
 
             if (
-                not self.is_front_clear()
-                and self.is_front_blocked()
+                front_is_still_present
                 and self.blocked_since is not None
                 and self.now_s() - self.blocked_since >= self.static_wait_s
             ):
@@ -2526,7 +2812,40 @@ class ObstacleDecisionNode(Node):
                         self.publish_stop("static_obstacle_no_valid_side_reading")
                         extra["reason"] = "no_valid_side_reading"
                     else:
-                        self.start_static_avoidance(side)
+                        self.get_logger().warn(
+                            "Persistent front obstacle confirmed after waiting | "
+                            f"front={front_distance:.1f} cm, "
+                            f"clear_requires={self.front_clear_cm:.1f} cm, "
+                            f"initial_side={side}"
+                        )
+                        self.request_front_servo_validation(side)
+
+        elif self.state == "STATIC_SERVO_VALIDATE_SIDE":
+            self.publish_stop("front_servo_validating_detour_side")
+            pending = self.servo_validation_pending
+            if pending is None:
+                self.abort_avoidance("missing_front_servo_validation_request")
+            elif pending.get("comparison_complete"):
+                selected_side = pending.get("selected_side")
+                if (
+                    selected_side in ("left", "right")
+                    and self.esp_stream_recent_for_transition()
+                ):
+                    self.servo_validation_pending = None
+                    self.get_logger().warn(
+                        "ESP telemetry recovered after servo comparison; "
+                        f"starting avoidance toward {selected_side}."
+                    )
+                    self.start_static_avoidance(selected_side)
+                    extra["reason"] = (
+                        f"servo_comparison_selected_{selected_side}_after_esp_recovery"
+                    )
+            elif (
+                self.now_s() - pending["started_s"]
+                > self.servo_validation_timeout_s
+            ):
+                self.servo_validation_pending = None
+                self.abort_avoidance("front_servo_validation_timeout")
 
         elif self.state == "PERSISTENT_STOPPED":
             self.publish_stop("persistent_obstacle_avoidance_disabled")
@@ -2822,9 +3141,11 @@ class ObstacleDecisionNode(Node):
                 self.complete_current_avoidance()
 
         elif self.state == "STATIC_NOMINAL_REJOIN":
-            if self.check_avoidance_motion_health() and self.pose_reached(
-                self.avoidance_target
-            ):
+            rejoin_complete = (
+                self.pose_reached(self.avoidance_target)
+                or self.esp_finished_target(self.avoidance_target)
+            )
+            if rejoin_complete:
                 if self.forbidden_detour_directions:
                     self.get_logger().warn(
                         "Navigation line recovered; clearing "
@@ -2833,10 +3154,12 @@ class ObstacleDecisionNode(Node):
                     )
                     self.forbidden_detour_directions.clear()
                 self.rejoin_nominal_after_avoidance = False
-                self.resume_original_target()
+                self.resume_original_target(require_confirmation=True)
                 self.state = "CLEAR"
                 self.blocked_since = None
                 self.reset_avoidance()
+            else:
+                self.check_avoidance_motion_health()
 
         elif self.state == "AVOIDANCE_PAUSED":
             self.publish_stop(

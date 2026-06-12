@@ -11,15 +11,46 @@ the ESP web endpoints from `Pose_Cascaded_GUI.ino`.
 - Runs on the Raspberry Pi 5.
 - Reads HC-SR04 sensors through `lgpio`.
 - Uses the shared trigger pin and the four echo pins from the test script.
-- Leaves servo GPIO output disabled for the first test, so the front/back
-  sensors must be positioned manually at center. Servo output and scanning can
-  be enabled later with `enable_servo_output: true` and
-  `enable_servo_scan: true`.
+- Keeps both sensors centered during normal driving. The front servo moves
+  only when the decision node requests a stationary detour-side check.
+- Servo PWM is not started during node startup, so launching the package does
+  not reposition the servos. PWM starts with the first validation request.
+- The front-servo PWM is disabled again immediately after each scan returns to
+  center, avoiding continuous servo current while the robot drives.
 - Sends one shared trigger pulse and captures all four echo lines from that
   measurement cycle. The default cycle is `80 ms`, above the HC-SR04 minimum
   recommended interval.
 - Publishes filtered JSON on `/obstacle/scan`.
 - Publishes every unfiltered measurement on `/obstacle/raw_scan`.
+
+### Front-servo detour validation
+
+Before ordinary forward static-obstacle avoidance starts, the robot remains
+stopped and compares both diagonal directions:
+
+1. The front sensor turns about 45 degrees toward the side initially preferred
+   by the fixed left/right sensors.
+2. Three readings are collected and their median is saved.
+3. The sensor returns to center, then repeats the scan for the other side.
+4. A scanned side is usable at any distance above
+   `servo_validation_stop_cm` (`20 cm`). There is no additional clearance
+   requirement.
+5. Among usable sides, the robot selects the side with the larger diagonal
+   median. The fixed side sensor must also remain above its normal stop limit.
+6. The front sensor returns to center before any movement command is sent.
+
+This version does not yet back up and rescan when both detour corridors are
+blocked.
+
+Calibrated front-servo pulses are `1100 us` right, `1500 us` center, and
+`1900 us` left. Useful terminal messages contain `FRONT SERVO VALIDATION`,
+followed by `FRONT SERVO SIDE COMPARISON COMPLETE`, which prints both medians
+and the selected side.
+
+The ten-second static timer continues while the stopped distance is anywhere
+below the `40 cm` clear threshold. This avoids becoming stuck in the dynamic
+waiting state when braking changes the reading from the `22 cm` stop distance
+to a slightly larger value.
 
 `esp_http_bridge_node`
 
@@ -115,6 +146,16 @@ the ESP web endpoints from `Pose_Cascaded_GUI.ino`.
   choosing a dangerous route. The direction memory remains active through the
   additional avoidance and path return, then clears after the navigation line
   is safely recovered so later independent obstacles use normal side choice.
+- This direction restriction is created only when a static avoidance is
+  interrupted by another persistent obstacle. Ordinary one-obstacle avoidance
+  continues choosing the larger valid clearance exactly as before. If the
+  second avoidance's local return would point back toward the remembered first
+  obstacle, that local return is skipped and the robot rejoins the navigation
+  path from its current cleared position.
+- Every moving stage of the second avoidance uses the same directional raw
+  sensor protection as normal avoidance: it stops at `22 cm`, waits until that
+  direction is clear beyond `40 cm`, then continues. Edge detection and body
+  margins remain unchanged.
 - After the additional static obstacle is cleared, the robot returns to the
   furthest forward point already reached on the original navigation line,
   rather than returning to the beginning of either avoidance maneuver. It

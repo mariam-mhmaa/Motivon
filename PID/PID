@@ -1475,6 +1475,47 @@ void initEncoderState(Wheel& w) {
   *(w.lastState) = (digitalRead(w.encAPin) << 1) | digitalRead(w.encBPin);
 }
 
+const char* wifiStatusText(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS: return "idle";
+    case WL_NO_SSID_AVAIL: return "SSID not found";
+    case WL_SCAN_COMPLETED: return "scan completed";
+    case WL_CONNECTED: return "connected";
+    case WL_CONNECT_FAILED: return "connection failed (check password/security)";
+    case WL_CONNECTION_LOST: return "connection lost";
+    case WL_DISCONNECTED: return "disconnected";
+    default: return "unknown";
+  }
+}
+
+void scanForConfiguredWiFi() {
+  Serial.print("Scanning for SSID: ");
+  Serial.println(WIFI_SSID);
+
+  int networkCount = WiFi.scanNetworks(false, true);
+  bool found = false;
+
+  if (networkCount <= 0) {
+    Serial.println("No WiFi networks found. Check antenna, distance, and 2.4 GHz coverage.");
+  } else {
+    for (int i = 0; i < networkCount; i++) {
+      if (WiFi.SSID(i) == WIFI_SSID) {
+        found = true;
+        Serial.print("Target SSID found. RSSI=");
+        Serial.print(WiFi.RSSI(i));
+        Serial.print(" dBm, channel=");
+        Serial.println(WiFi.channel(i));
+      }
+    }
+  }
+
+  if (!found) {
+    Serial.println("Target SSID was not found. Check spelling and ensure 2.4 GHz is enabled.");
+  }
+
+  WiFi.scanDelete();
+}
+
 void setupWiFi() {
   WiFi.mode(WIFI_STA);
 #if defined(ESP32)
@@ -1482,6 +1523,11 @@ void setupWiFi() {
 #elif defined(ESP8266)
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
 #endif
+
+  Serial.print("ESP WiFi MAC: ");
+  Serial.println(WiFi.macAddress());
+  scanForConfiguredWiFi();
+
   WiFi.config(localIP, gateway, subnet);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
@@ -1502,6 +1548,12 @@ void setupWiFi() {
     Serial.println(WiFi.localIP());
   } else {
     usingBackupAp = true;
+    wl_status_t status = WiFi.status();
+    Serial.print("Station connection status: ");
+    Serial.print(wifiStatusText(status));
+    Serial.print(" (");
+    Serial.print((int)status);
+    Serial.println(")");
     Serial.println("WiFi failed. Starting backup AP DeliveryRobot_AP / 12345678");
     WiFi.mode(WIFI_AP);
     WiFi.softAP("DeliveryRobot_AP", "12345678");
