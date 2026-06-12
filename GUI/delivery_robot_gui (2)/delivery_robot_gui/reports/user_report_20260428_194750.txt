@@ -1,0 +1,51 @@
+======================================================================
+USER DELIVERY REPORT
+Generated: 2026-04-28 19:47:50
+======================================================================
+
+📦 USER: ainour
+----------------------------------------------------------------------
+  Total Requests: 4
+  Completed: 1
+  Pending: 3
+  Cancelled: 0
+  Delivering: 0
+  Completion Rate: 25.0%
+
+  Recent Requests:
+    - REQ0006: Object-2 → Station C (pending)
+    - REQ0005: Object-1 → Station B (pending)
+    - REQ0004: Object-0 → Station A (pending)
+    - REQ0001: Document → Station A (completed)
+
+📦 USER: mariam
+----------------------------------------------------------------------
+  Total Requests: 4
+  Completed: 0
+  Pending: 3
+  Cancelled: 0
+  Delivering: 1
+  Completion Rate: 0.0%
+
+  Recent Requests:
+    - REQ0009: Object-5 → Station C (pending)
+    - REQ0008: Object-4 → Station B (pending)
+    - REQ0007: Object-3 → Station A (pending)
+    - REQ0002: Package → Station B (delivering)
+
+📦 USER: zeina
+----------------------------------------------------------------------
+  Total Requests: 4
+  Completed: 0
+  Pending: 4
+  Cancelled: 0
+  Delivering: 0
+  Completion Rate: 0.0%
+
+  Recent Requests:
+    - REQ0012: Object-8 → Station C (pending)
+    - REQ0011: Object-7 → Station B (pending)
+    - REQ0010: Object-6 → Station A (pending)
+    - REQ0003: Box → Station C (pending)
+
+======================================================================
