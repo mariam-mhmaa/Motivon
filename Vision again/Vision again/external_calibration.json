@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-04-19T11:38:49.054745",
+  "source": {
+    "external_faces_dir": "C:\\Users\\ainour\\OneDrive - Faculty of Engineering Ain Shams University\\Desktop\\Vision again\\external_faces",
+    "external_total_images": 300,
+    "external_used_faces": 108,
+    "validation_used_faces": 97
+  },
+  "current": {
+    "confidence_threshold": 0.45,
+    "margin_threshold": 0.08,
+    "class_min_confidence": {
+      "Ainour": 0.62,
+      "Mariam": 0.5,
+      "Nour": 0.54,
+      "Zeina": 0.3
+    }
+  },
+  "recommended": {
+    "confidence_threshold": 0.45,
+    "margin_threshold": 0.08,
+    "class_min_confidence": {
+      "Ainour": 0.7036,
+      "Mariam": 0.62,
+      "Nour": 0.66,
+      "Zeina": 0.3
+    }
+  },
+  "stats": {
+    "external_prob_p90": 0.7414300441741943,
+    "external_prob_p95": 0.7621190547943115,
+    "known_correct_prob_p10": 0.6739498376846313,
+    "external_margin_p90": 0.5177401900291443,
+    "known_correct_margin_p10": 0.34980401396751404
+  }
+}
