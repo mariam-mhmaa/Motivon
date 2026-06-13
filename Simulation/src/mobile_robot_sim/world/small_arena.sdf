@@ -1,0 +1,188 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <world name="small_arena">
+
+    <!--
+      Arena layout (all dimensions in metres):
+        Floor  :  3.5 m (x: -1.75 … +1.75) × 3.0 m (y: -1.50 … +1.50)
+        Floor thickness : 0.05 m (top surface at z = 0)
+        Wall thickness  : 0.10 m
+        Wall height     : 0.50 m
+        Opening         : 1.0 m gap in the SOUTH wall (y = -1.50)
+                          at the TOP (right/+x) edge: x = +0.75 … +1.75
+                          leaving a 2.5 m solid section: x = -1.75 … +0.75
+    -->
+
+    <!-- ── Required Gazebo Harmonic / ROS 2 Jazzy plugins ── -->
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system"
+            name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-contact-system"
+            name="gz::sim::systems::Contact"/>
+
+    <!-- ── Physics ── -->
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <scene>
+      <shadows>true</shadows>
+    </scene>
+
+    <!-- ── Sun ── -->
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.1 0.1 0.1 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.5 -1</direction>
+    </light>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         FLOOR  –  3.5 m × 3.0 m box, top surface flush with z = 0
+         ═══════════════════════════════════════════════════════════ -->
+    <model name="arena_floor">
+      <static>true</static>
+      <!-- centre sits 0.025 m below z=0 so the top face is at z=0 -->
+      <pose>0 0 -0.025 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>3.5 3.0 0.05</size></box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>3.5 3.0 0.05</size></box>
+          </geometry>
+          <material>
+            <!-- light grey floor -->
+            <ambient>0.65 0.65 0.65 1</ambient>
+            <diffuse>0.65 0.65 0.65 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         SOUTH WALL  (y = -1.50)  –  1 m OPENING at the TOP (+x end)
+         The opening covers  x = +0.75 … +1.75  (right 1 m of the wall).
+         Solid section runs x = -1.75 … +0.75  (left 2.5 m).
+           centre: (-0.50, -1.50, 0.25)   size: 2.50 × 0.10 × 0.50
+         ═══════════════════════════════════════════════════════════ -->
+    <model name="wall_south">
+      <static>true</static>
+      <!-- x-centre of 2.5 m segment: (-1.75 + 0.75) / 2 = -0.50 -->
+      <pose>-0.50 -1.50 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>2.5 0.1 0.5</size></box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>2.5 0.1 0.5</size></box>
+          </geometry>
+          <material>
+            <ambient>0.85 0.85 0.85 1</ambient>
+            <diffuse>0.85 0.85 0.85 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <!-- gap from x = +0.75 to +1.75 is the 1 m entrance opening -->
+
+    <!-- ═══════════════════════════════════════════════════════════
+         NORTH WALL  (y = +1.50)  –  full width 3.5 m
+         centre: (0, +1.50, 0.25)   size: 3.5 × 0.10 × 0.50
+         ═══════════════════════════════════════════════════════════ -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 1.50 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>3.5 0.1 0.5</size></box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>3.5 0.1 0.5</size></box>
+          </geometry>
+          <material>
+            <ambient>0.85 0.85 0.85 1</ambient>
+            <diffuse>0.85 0.85 0.85 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         LEFT / WEST WALL  (x = -1.75)  –  full depth 3.0 m
+         centre: (-1.75, 0, 0.25)   size: 0.10 × 3.00 × 0.50
+         ═══════════════════════════════════════════════════════════ -->
+    <model name="wall_left">
+      <static>true</static>
+      <pose>-1.75 0 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>0.1 3.0 0.5</size></box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>0.1 3.0 0.5</size></box>
+          </geometry>
+          <material>
+            <ambient>0.85 0.85 0.85 1</ambient>
+            <diffuse>0.85 0.85 0.85 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         RIGHT / EAST WALL  (x = +1.75)  –  full depth 3.0 m
+         centre: (1.75, 0, 0.25)   size: 0.10 × 3.00 × 0.50
+         ═══════════════════════════════════════════════════════════ -->
+    <model name="wall_right">
+      <static>true</static>
+      <pose>1.75 0 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>0.1 3.0 0.5</size></box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>0.1 3.0 0.5</size></box>
+          </geometry>
+          <material>
+            <ambient>0.85 0.85 0.85 1</ambient>
+            <diffuse>0.85 0.85 0.85 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>
