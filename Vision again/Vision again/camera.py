@@ -88,7 +88,7 @@ class PiCamera:
         
         try:
             self.sock.connect((self.host, self.port))
-            self.sock.settimeout(3)
+            self.sock.settimeout(10)
             self.is_running = True
             logger.info("✓ Connected to camera stream")
             return True
@@ -172,15 +172,22 @@ class PiCamera:
         # Kill any existing processes
         self._kill_existing_processes()
         time.sleep(0.5)
+
+        rpicam_bin = self._resolve_camera_binary()
+        if rpicam_bin is None:
+            logger.error("✗ No Raspberry Pi camera binary found. Tried rpicam-vid and libcamera-vid.")
+            self.is_running = False
+            return
         
         # Build the rpicam + ffmpeg pipeline
         rpicam_cmd = [
-            'rpicam-vid',
+            rpicam_bin,
             '-t', '0',           # Run forever
             '-n',                # No preview
             '--width', str(self.width),
             '--height', str(self.height),
             '--framerate', str(self.framerate),
+            '--quality', '95',   # Higher source quality for MJPEG capture
             '--codec', self.codec,
             '-o', '-'            # Output to stdout
         ]
@@ -193,8 +200,7 @@ class PiCamera:
             '-flags', 'low_delay',
             '-f', self.codec,    # Input format matches rpicam output
             '-i', 'pipe:0',      # Read from stdin
-            '-c:v', 'mjpeg',     # Output MJPEG for reliable parsing
-            '-q:v', '8',         # Quality
+            '-c:v', 'copy',      # Preserve source MJPEG quality
             '-f', 'mjpeg',       # MJPEG format
             f'tcp://{self.host}:{self.port}?listen=1'
         ]
@@ -218,6 +224,20 @@ class PiCamera:
             
             # Allow rpicam's stdout to be closed when ffmpeg closes
             self.process.stdout.close()
+
+            time.sleep(0.5)
+            if self.process.poll() is not None:
+                self._log_process_failure("rpicam", self.process)
+                if ffmpeg_process.poll() is None:
+                    ffmpeg_process.terminate()
+                self.is_running = False
+                return
+            if ffmpeg_process.poll() is not None:
+                self._log_process_failure("ffmpeg", ffmpeg_process)
+                if self.process.poll() is None:
+                    self.process.terminate()
+                self.is_running = False
+                return
             
             self.is_running = True
             logger.info(f"✓ Camera server started")
@@ -241,9 +261,32 @@ class PiCamera:
         """Kill any existing rpicam and ffmpeg processes."""
         try:
             subprocess.run(['pkill', '-f', 'rpicam'], check=False)
+            subprocess.run(['pkill', '-f', 'libcamera'], check=False)
             subprocess.run(['pkill', '-f', 'ffmpeg'], check=False)
         except:
             pass
+
+    def _resolve_camera_binary(self):
+        """Return the first available camera capture binary."""
+        for binary in ('rpicam-vid', 'libcamera-vid'):
+            if subprocess.run(['which', binary], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                return binary
+        return None
+
+    def _log_process_failure(self, name, process):
+        """Log exit code and stderr when a child process dies."""
+        stderr_output = ''
+        try:
+            if process.stderr is not None:
+                stderr_output = process.stderr.read().decode('utf-8', errors='replace').strip()
+        except Exception:
+            stderr_output = ''
+
+        return_code = process.poll()
+        if stderr_output:
+            logger.error(f"✗ {name} exited with code {return_code}: {stderr_output}")
+        else:
+            logger.error(f"✗ {name} exited with code {return_code} and no stderr output")
     
     def _monitor_processes(self, rpicam_proc, ffmpeg_proc):
         """Monitor processes and restart if they die."""
@@ -267,7 +310,7 @@ class PiCamera:
 # Quick utility functions for easy use
 # =====================================================================
 
-def get_client_camera(host='192.168.1.200', port=8888, width=240, height=180, framerate=8):
+def get_client_camera(host='192.168.1.200', port=8888, width=1280, height=720, framerate=8):
     """Create a client camera that connects to remote Pi camera."""
     return PiCamera(
         mode='client',
@@ -279,7 +322,7 @@ def get_client_camera(host='192.168.1.200', port=8888, width=240, height=180, fr
     )
 
 
-def get_server_camera(host='0.0.0.0', port=8888, width=240, height=180, framerate=8, codec='mjpeg'):
+def get_server_camera(host='0.0.0.0', port=8888, width=1280, height=720, framerate=8, codec='mjpeg'):
     """Create a server camera (for running on Raspberry Pi)."""
     return PiCamera(
         mode='server',
@@ -301,7 +344,7 @@ if __name__ == '__main__':
     
     if len(sys.argv) > 1 and sys.argv[1] == 'server':
         # Run on Raspberry Pi
-        camera = get_server_camera(host='0.0.0.0', port=8888, width=240, height=180, framerate=8)
+        camera = get_server_camera(host='0.0.0.0', port=8888, width=1280, height=720, framerate=8)
         camera.start_server()
         
         try:
