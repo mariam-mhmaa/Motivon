@@ -26,15 +26,15 @@ from camera import get_client_camera
 # =========================
 # CAMERA CONFIG
 # =========================
-PI_CAMERA_HOST = "192.168.1.200"  # Change to your Raspberry Pi IP address
+PI_CAMERA_HOST = "192.168.1.111"  # Change to your Raspberry Pi IP address
 PI_CAMERA_PORT = 8888
-CAMERA_WIDTH = 240
-CAMERA_HEIGHT = 180
+CAMERA_WIDTH = 1280
+CAMERA_HEIGHT = 720
 CAMERA_FRAMERATE = 8
 
 PROCESS_EVERY_N_FRAMES = 2  # 2 = process every second frame, reducing recognition lag.
-DISPLAY_WIDTH = 640         # Resize only for laptop display.
-DISPLAY_HEIGHT = 480
+DISPLAY_WIDTH = 720         # Square display to avoid stretching the feed.
+DISPLAY_HEIGHT = 720
 
 
 def compute_lbp_histogram(gray):
@@ -777,10 +777,10 @@ class FaceRecognitionSystem:
         y_pos = 30
         for text in info_text:
             cv2.putText(frame, text, (10, y_pos),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
             cv2.putText(frame, text, (10, y_pos),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
-            y_pos += 23
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 1)
+            y_pos += 28
 
         return frame
 
@@ -839,17 +839,22 @@ class FaceRecognitionSystem:
                 ret, frame = cap.read()
 
                 if not ret:
-                    print("Error reading frame from Raspberry Pi RAW TCP stream")
-                    break
+                    print("Waiting for first frame from Raspberry Pi RAW TCP stream...")
+                    continue
 
                 frame_count += 1
                 self.processing_stats["total_frames_processed"] = frame_count
 
-                # Resize only for display readability. Recognition still works on the received frame.
+                # Center-crop to a square before resizing so the display stays square without stretching.
                 if DISPLAY_WIDTH and DISPLAY_HEIGHT:
-                    display_frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
-                    scale_x = DISPLAY_WIDTH / frame.shape[1]
-                    scale_y = DISPLAY_HEIGHT / frame.shape[0]
+                    frame_h, frame_w = frame.shape[:2]
+                    crop_size = min(frame_w, frame_h)
+                    crop_x = (frame_w - crop_size) // 2
+                    crop_y = (frame_h - crop_size) // 2
+                    square_frame = frame[crop_y:crop_y + crop_size, crop_x:crop_x + crop_size]
+                    display_frame = cv2.resize(square_frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+                    scale_x = DISPLAY_WIDTH / crop_size
+                    scale_y = DISPLAY_HEIGHT / crop_size
                 else:
                     display_frame = frame.copy()
                     scale_x = 1.0
@@ -912,10 +917,10 @@ class FaceRecognitionSystem:
                 draw_bbox = last_bbox
                 if draw_bbox is not None and (scale_x != 1.0 or scale_y != 1.0):
                     draw_bbox = np.array([
-                        int(last_bbox[0] * scale_x),
-                        int(last_bbox[1] * scale_y),
-                        int(last_bbox[2] * scale_x),
-                        int(last_bbox[3] * scale_y),
+                        int((last_bbox[0] - crop_x) * scale_x),
+                        int((last_bbox[1] - crop_y) * scale_y),
+                        int((last_bbox[2] - crop_x) * scale_x),
+                        int((last_bbox[3] - crop_y) * scale_y),
                     ], dtype=int)
 
                 display_frame = self.draw_predictions(
