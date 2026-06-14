@@ -1,0 +1,711 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot
+  name="DeliveryRobot_2"
+  xmlns:gz="http://gazebosim.org/schema">
+
+  <!-- ==================== Gazebo ros2_control plugin ==================== -->
+  <gazebo>
+    <plugin filename="gz-sim-joint-state-publisher-system"
+            name="gz::sim::systems::JointStatePublisher">
+      <topic>joint_states</topic>
+    </plugin>
+  </gazebo>
+
+  <!-- ==================== RobotBody (base_link) ==================== -->
+  <link
+    name="RobotBody">
+    <inertial>
+      <origin
+        xyz="0.0121977788254711 -0.00110703074433194 0.071707196657291"
+        rpy="0 0 0" />
+      <mass
+        value="7.51206590551424" />
+      <inertia
+        ixx="0.0769908374105067"
+        ixy="1.19967632414152E-06"
+        ixz="0.000670786314709633"
+        iyy="0.110330604583865"
+        iyz="-1.93687741098257E-05"
+        izz="0.163724208451728" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="file:///home/zeinazz/design_ws/install/mobile_robot_sim/share/mobile_robot_sim/meshes/RobotBody.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0.012 0 0.07"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.39 0.47 0.14" />
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== RL_Wheel ==================== -->
+  <link
+    name="RL_Wheel">
+    <inertial>
+      <origin
+        xyz="-1.34406336005366E-07 3.9905593718359E-08 -0.0118200674161195"
+        rpy="0 0 0" />
+      <mass
+        value="0.140237419679539" />
+      <inertia
+        ixx="2.72055362006342E-05"
+        ixy="2.75400221469168E-10"
+        ixz="6.23456199572729E-12"
+        iyy="2.72070295245423E-05"
+        iyz="-3.34657496971275E-11"
+        izz="2.87493686781454E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="file:///home/zeinazz/design_ws/install/mobile_robot_sim/share/mobile_robot_sim/meshes/RL_Wheel.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0 0 0 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 -0.012"
+        rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.06" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="RL_Joint"
+    type="continuous">
+    <origin
+      xyz="-0.1975 -0.23596 -0.025"
+      rpy="1.5708 0 0" />
+    <parent
+      link="RobotBody" />
+    <child
+      link="RL_Wheel" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      effort="2"
+      velocity="20" />
+  </joint>
+
+  <!-- ==================== RR_Wheel ==================== -->
+  <link
+    name="RR_Wheel">
+    <inertial>
+      <origin
+        xyz="-1.0095125037024E-06 2.69893383642028E-07 0.0117631801590439"
+        rpy="0 0 0" />
+      <mass
+        value="0.140242768860157" />
+      <inertia
+        ixx="2.72082470884897E-05"
+        ixy="-1.21453746959876E-10"
+        ixz="8.30766496609559E-11"
+        iyy="2.72087892197053E-05"
+        iyz="1.8654404533443E-10"
+        izz="2.87540011754137E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="file:///home/zeinazz/design_ws/install/mobile_robot_sim/share/mobile_robot_sim/meshes/RR_Wheel.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0 0 0 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0.012"
+        rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.06" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="RR_Joint"
+    type="continuous">
+    <origin
+      xyz="-0.1975 0.23634 -0.025"
+      rpy="1.5708 0 0" />
+    <parent
+      link="RobotBody" />
+    <child
+      link="RR_Wheel" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      effort="2"
+      velocity="20" />
+  </joint>
+
+  <!-- ==================== FR_Wheel ==================== -->
+  <link
+    name="FR_Wheel">
+    <inertial>
+      <origin
+        xyz="2.18173434318736E-07 5.63112906304397E-08 0.0118200697311706"
+        rpy="0 0 0" />
+      <mass
+        value="0.140237535352243" />
+      <inertia
+        ixx="2.72059827875639E-05"
+        ixy="-7.1461410674323E-10"
+        ixz="7.14665581005552E-12"
+        iyy="2.72066213673703E-05"
+        iyz="-2.47020649852739E-11"
+        izz="2.87493760574907E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="file:///home/zeinazz/design_ws/install/mobile_robot_sim/share/mobile_robot_sim/meshes/FR_Wheel.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0 0 0 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0.012"
+        rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.06" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="FR_Joint"
+    type="continuous">
+    <origin
+      xyz="0.1975 0.23634 -0.025"
+      rpy="1.5708 0 0" />
+    <parent
+      link="RobotBody" />
+    <child
+      link="FR_Wheel" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      effort="2"
+      velocity="20" />
+  </joint>
+
+  <!-- ==================== FL_Wheel ==================== -->
+  <link
+    name="FL_Wheel">
+    <inertial>
+      <origin
+        xyz="1.06228346097303E-06 -1.6122280410702E-07 -0.0117631557797424"
+        rpy="0 0 0" />
+      <mass
+        value="0.140242689275222" />
+      <inertia
+        ixx="2.72084404907458E-05"
+        ixy="2.88916204886195E-10"
+        ixz="-2.2806907450469E-11"
+        iyy="2.72085403616973E-05"
+        iyz="-2.07964704173423E-10"
+        izz="2.87539407631995E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="file:///home/zeinazz/design_ws/install/mobile_robot_sim/share/mobile_robot_sim/meshes/FL_Wheel.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0 0 0 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 -0.012"
+        rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.06" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="FL_Joint"
+    type="continuous">
+    <origin
+      xyz="0.1975 -0.23596 -0.025"
+      rpy="1.5708 0 0" />
+    <parent
+      link="RobotBody" />
+    <child
+      link="FL_Wheel" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      effort="2"
+      velocity="20" />
+  </joint>
+
+  <!-- ==================== Mecanum Wheel Friction (anisotropic for roller simulation) ==================== -->
+  <!-- fdir1 expressed in RobotBody (chassis) frame: high friction along fdir1, zero perpendicular (roller slip) -->
+  <!-- Standard mecanum layout: FL/RR wheels have rollers at +45deg, FR/RL at -45deg -->
+  <!-- Plugin has FR->left, FL->right due to our +Y=right CAD convention                                      -->
+  <gazebo reference="FL_Wheel">
+    <collision>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>0.0</mu2>
+            <fdir1 gz:expressed_in='RobotBody'>1 1 0</fdir1>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+  </gazebo>
+
+  <gazebo reference="FR_Wheel">
+    <collision>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>0.0</mu2>
+            <fdir1 gz:expressed_in='RobotBody'>1 -1 0</fdir1>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+  </gazebo>
+
+  <gazebo reference="RL_Wheel">
+    <collision>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>0.0</mu2>
+            <fdir1 gz:expressed_in='RobotBody'>1 -1 0</fdir1>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+  </gazebo>
+
+  <gazebo reference="RR_Wheel">
+    <collision>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>0.0</mu2>
+            <fdir1 gz:expressed_in='RobotBody'>1 1 0</fdir1>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+  </gazebo>
+
+  <!-- ==================== Lid ==================== -->
+  <link
+    name="Lid">
+    <inertial>
+      <origin
+        xyz="-0.0137914821400988 -0.0181458602319533 -0.0280728578180717"
+        rpy="0 0 0" />
+      <mass
+        value="0.328922397150776" />
+      <inertia
+        ixx="0.00404537572099659"
+        ixy="2.10933622848677E-09"
+        ixz="-2.63417294301499E-10"
+        iyy="0.00190327681198023"
+        iyz="-1.02868108120959E-06"
+        izz="0.002246887155159" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="file:///home/zeinazz/design_ws/install/mobile_robot_sim/share/mobile_robot_sim/meshes/Lid.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0 0 0 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="-0.014 -0.018 -0.028"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.39 0.47 0.02" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Lid_Joint"
+    type="prismatic">
+    <origin
+      xyz="0.0013003 0.0011755 0.211"
+      rpy="3.1416 -1.5708 0" />
+    <parent
+      link="RobotBody" />
+    <child
+      link="Lid" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="0"
+      upper="0.14"
+      effort="100"
+      velocity="2" />
+        <dynamics damping="0.5" friction="0.1" />
+  </joint>
+
+  <!-- ==================== IMU SENSOR ==================== -->
+  <link name="imu_link">
+    <inertial>
+      <mass value="0.05"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0"
+               iyy="1e-5" iyz="0"
+               izz="1e-5"/>
+    </inertial>
+    <visual>
+      <geometry>
+        <box size="0.02 0.02 0.01"/>
+      </geometry>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.02 0.02 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="imu_joint" type="fixed">
+    <parent link="RobotBody"/>
+    <child link="imu_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <gazebo reference="imu_link">
+    <sensor name="imu_sensor" type="imu">
+      <always_on>true</always_on>
+      <update_rate>50</update_rate>
+      <topic>imu</topic>
+      <plugin filename="gz-sim-imu-system"
+              name="gz::sim::systems::Imu"/>
+    </sensor>
+  </gazebo>
+
+  <!-- ==================== ULTRASONIC FRONT ==================== -->
+  <link name="ultrasonic_front_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.005" length="0.005"/>
+      </geometry>
+      <material name="sensor_mat"><color rgba="0.3 0.3 0.3 1"/></material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.005" length="0.005"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0"
+               iyy="1e-5" iyz="0"
+               izz="1e-5"/>
+    </inertial>
+  </link>
+
+  <joint name="ultrasonic_front_joint" type="fixed">
+    <parent link="RobotBody"/>
+    <child link="ultrasonic_front_link"/>
+    <origin xyz="0.25 0.0 0.07" rpy="0 0 0"/>
+  </joint>
+
+  <gazebo reference="ultrasonic_front_link">
+    <sensor name="ultrasonic_front_sensor" type="gpu_lidar">
+      <update_rate>50</update_rate>
+      <topic>/ultrasonic/front</topic>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>5</samples>
+            <resolution>1</resolution>
+            <min_angle>-0.2618</min_angle>
+            <max_angle>0.2618</max_angle>
+          </horizontal>
+          <vertical>
+            <samples>1</samples>
+            <resolution>0.01</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </vertical>
+        </scan>
+        <range>
+          <min>0.12</min>
+          <max>10.0</max>
+          <resolution>0.01</resolution>
+        </range>
+      </ray>
+      <always_on>1</always_on>
+      <visualize>true</visualize>
+    </sensor>
+  </gazebo>
+
+  <!-- ==================== ULTRASONIC BACK ==================== -->
+  <link name="ultrasonic_back_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.005" length="0.005"/>
+      </geometry>
+      <material name="sensor_mat"><color rgba="0.3 0.3 0.3 1"/></material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.005" length="0.005"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0"
+               iyy="1e-5" iyz="0"
+               izz="1e-5"/>
+    </inertial>
+  </link>
+
+  <joint name="ultrasonic_back_joint" type="fixed">
+    <parent link="RobotBody"/>
+    <child link="ultrasonic_back_link"/>
+    <origin xyz="-0.25 0.0 0.07" rpy="0 0 3.14159"/>
+  </joint>
+
+  <gazebo reference="ultrasonic_back_link">
+    <sensor name="ultrasonic_back_sensor" type="gpu_lidar">
+      <update_rate>50</update_rate>
+      <topic>/ultrasonic/back</topic>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>5</samples>
+            <resolution>1</resolution>
+            <min_angle>-0.2618</min_angle>
+            <max_angle>0.2618</max_angle>
+          </horizontal>
+          <vertical>
+            <samples>1</samples>
+            <resolution>0.01</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </vertical>
+        </scan>
+        <range>
+          <min>0.12</min>
+          <max>10.0</max>
+          <resolution>0.01</resolution>
+        </range>
+      </ray>
+      <always_on>1</always_on>
+      <visualize>true</visualize>
+    </sensor>
+  </gazebo>
+
+  <!-- ==================== ULTRASONIC LEFT ==================== -->
+  <link name="ultrasonic_left_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.005" length="0.005"/>
+      </geometry>
+      <material name="sensor_mat"><color rgba="0.3 0.3 0.3 1"/></material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.005" length="0.005"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0"
+               iyy="1e-5" iyz="0"
+               izz="1e-5"/>
+    </inertial>
+  </link>
+
+  <joint name="ultrasonic_left_joint" type="fixed">
+    <parent link="RobotBody"/>
+    <child link="ultrasonic_left_link"/>
+    <origin xyz="0.0 -0.24 0.07" rpy="0 0 -1.5708"/>
+  </joint>
+
+  <gazebo reference="ultrasonic_left_link">
+    <sensor name="ultrasonic_left_sensor" type="gpu_lidar">
+      <update_rate>50</update_rate>
+      <topic>/ultrasonic/left</topic>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>5</samples>
+            <resolution>1</resolution>
+            <min_angle>-0.2618</min_angle>
+            <max_angle>0.2618</max_angle>
+          </horizontal>
+          <vertical>
+            <samples>1</samples>
+            <resolution>0.01</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </vertical>
+        </scan>
+        <range>
+          <min>0.12</min>
+          <max>10.0</max>
+          <resolution>0.01</resolution>
+        </range>
+      </ray>
+      <always_on>1</always_on>
+      <visualize>true</visualize>
+    </sensor>
+  </gazebo>
+
+  <!-- ==================== ULTRASONIC RIGHT ==================== -->
+  <link name="ultrasonic_right_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.005" length="0.005"/>
+      </geometry>
+      <material name="sensor_mat"><color rgba="0.3 0.3 0.3 1"/></material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.005" length="0.005"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0"
+               iyy="1e-5" iyz="0"
+               izz="1e-5"/>
+    </inertial>
+  </link>
+
+  <joint name="ultrasonic_right_joint" type="fixed">
+    <parent link="RobotBody"/>
+    <child link="ultrasonic_right_link"/>
+    <origin xyz="0.0 0.24 0.07" rpy="0 0 1.5708"/>
+  </joint>
+
+  <gazebo reference="ultrasonic_right_link">
+    <sensor name="ultrasonic_right_sensor" type="gpu_lidar">
+      <update_rate>50</update_rate>
+      <topic>/ultrasonic/right</topic>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>5</samples>
+            <resolution>1</resolution>
+            <min_angle>-0.2618</min_angle>
+            <max_angle>0.2618</max_angle>
+          </horizontal>
+          <vertical>
+            <samples>1</samples>
+            <resolution>0.01</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </vertical>
+        </scan>
+        <range>
+          <min>0.12</min>
+          <max>10.0</max>
+          <resolution>0.01</resolution>
+        </range>
+      </ray>
+      <always_on>1</always_on>
+      <visualize>true</visualize>
+    </sensor>
+  </gazebo>
+
+  <!-- ==================== Gazebo Native MecanumDrive Plugin ==================== -->
+  <gazebo>
+    <plugin filename="gz-sim-mecanum-drive-system"
+            name="gz::sim::systems::MecanumDrive">
+      <!-- Plugin expects +Y=left (ROS convention). Our robot: +Y=right (CAD). Swap L/R to compensate. -->
+      <!-- FR_Joint at y=+0.236 maps to plugin's front_left (+Y side) -->
+      <!-- FL_Joint at y=-0.236 maps to plugin's front_right (-Y side) -->
+      <front_left_joint>FR_Joint</front_left_joint>
+      <front_right_joint>FL_Joint</front_right_joint>
+      <back_left_joint>RR_Joint</back_left_joint>
+      <back_right_joint>RL_Joint</back_right_joint>
+      <wheel_separation>0.4723</wheel_separation>
+      <wheelbase>0.395</wheelbase>
+      <wheel_radius>0.06</wheel_radius>
+      <min_acceleration>-5</min_acceleration>
+      <max_acceleration>5</max_acceleration>
+      <topic>/model/DeliveryRobot_Sim/cmd_vel</topic>
+      <odom_topic>/model/DeliveryRobot_Sim/odometry</odom_topic>
+      <tf_topic>/model/DeliveryRobot_Sim/tf</tf_topic>
+    </plugin>
+  </gazebo>
+
+
+  <!-- ==================== Gazebo Native Lid Position Controller ==================== -->
+  <gazebo>
+    <plugin filename="gz-sim-joint-position-controller-system"
+            name="gz::sim::systems::JointPositionController">
+      <joint_name>Lid_Joint</joint_name>
+      <topic>/lid_position</topic>
+      <p_gain>500</p_gain>
+      <i_gain>5</i_gain>
+      <d_gain>10</d_gain>
+      <i_max>50</i_max>
+      <i_min>-50</i_min>
+      <cmd_max>100</cmd_max>
+      <cmd_min>-100</cmd_min>
+    </plugin>
+  </gazebo>
+
+</robot>

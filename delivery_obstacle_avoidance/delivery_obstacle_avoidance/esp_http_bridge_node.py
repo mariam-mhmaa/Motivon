@@ -24,6 +24,8 @@ class EspHttpBridgeNode(Node):
         self.declare_parameter("poll_timeout_s", 0.30)
         self.declare_parameter("command_timeout_s", 0.75)
         self.declare_parameter("stop_heartbeat_s", 1.00)
+        self.declare_parameter("status_refresh_s", 10.0)
+        self.declare_parameter("poll_failure_backoff_s", 1.0)
 
         self.esp_base_url = self.get_parameter("esp_base_url").value.rstrip("/")
         self.poll_timeout_s = float(
@@ -34,6 +36,12 @@ class EspHttpBridgeNode(Node):
         )
         self.stop_heartbeat_s = float(
             self.get_parameter("stop_heartbeat_s").value
+        )
+        self.status_refresh_s = float(
+            self.get_parameter("status_refresh_s").value
+        )
+        self.poll_failure_backoff_s = float(
+            self.get_parameter("poll_failure_backoff_s").value
         )
 
         self.data_pub = self.create_publisher(String, "/esp/data", 10)
@@ -51,6 +59,7 @@ class EspHttpBridgeNode(Node):
         self._poll_suppressed_until_s = 0.0
         self._poll_failure_started_s = None
         self._last_poll_failure_log_s = 0.0
+        self._next_poll_attempt_s = 0.0
         self._last_operator_request_id = 0
         self._obstacle_state_lock = threading.Lock()
         self._latest_obstacle_state = None
@@ -156,16 +165,29 @@ class EspHttpBridgeNode(Node):
             "right": self.query_distance(state.get("right_cm")),
             "reset": "1" if state.get("reset_required", False) else "0",
         }
+        final_destination = state.get("final_destination") or {}
+        query.update(
+            {
+                "goal_x": self.query_distance(final_destination.get("x")),
+                "goal_y": self.query_distance(final_destination.get("y")),
+                "goal_yaw": self.query_distance(
+                    final_destination.get("yaw")
+                ),
+            }
+        )
         signature = (
             query["state"],
             query["text"],
             query["reason"],
             query["reset"],
+            query["goal_x"],
+            query["goal_y"],
+            query["goal_yaw"],
         )
         now = time.monotonic()
         if (
             signature == self._last_status_signature
-            and now - self._last_status_push_s < 2.0
+            and now - self._last_status_push_s < self.status_refresh_s
         ):
             return
 
@@ -246,6 +268,7 @@ class EspHttpBridgeNode(Node):
         if (
             self._command_active.is_set()
             or time.monotonic() < self._poll_suppressed_until_s
+            or time.monotonic() < self._next_poll_attempt_s
         ):
             return
 
@@ -263,6 +286,7 @@ class EspHttpBridgeNode(Node):
             now = time.monotonic()
             if self._poll_failure_started_s is None:
                 self._poll_failure_started_s = now
+            self._next_poll_attempt_s = now + self.poll_failure_backoff_s
             if now - self._last_poll_failure_log_s >= 1.0:
                 failed_for_s = now - self._poll_failure_started_s
                 self.get_logger().error(
@@ -281,6 +305,7 @@ class EspHttpBridgeNode(Node):
                 f"ESP telemetry recovered after {failed_for_s:.1f}s."
             )
             self._poll_failure_started_s = None
+        self._next_poll_attempt_s = 0.0
 
         msg = String()
         msg.data = data
@@ -339,7 +364,7 @@ class EspHttpBridgeNode(Node):
             )
             self.publish_status(False, str(command_type), str(exc))
         finally:
-            self._poll_suppressed_until_s = time.monotonic() + 0.10
+            self._poll_suppressed_until_s = time.monotonic() + 0.50
             self._command_active.clear()
 
 

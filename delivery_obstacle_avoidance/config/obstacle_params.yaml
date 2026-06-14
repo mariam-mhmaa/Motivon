@@ -11,10 +11,16 @@ ultrasonic_scan_node:
     servo_center_us: 1500
     servo_plus_45_us: 1750
     servo_minus_45_us: 1250
+    front_servo_right_45_us: 1100
+    front_servo_center_us: 1500
+    front_servo_left_45_us: 1900
+    back_servo_center_us: 1500
     scan_period_s: 0.08
-    servo_settle_s: 0.30
-    servo_step_us: 10
-    enable_servo_output: false
+    servo_settle_s: 0.20
+    servo_step_us: 40
+    stationary_scan_samples: 3
+    stationary_scan_max_attempts: 9
+    enable_servo_output: true
     enable_servo_scan: false
     print_readings: true
     print_period_s: 0.50
@@ -35,6 +41,9 @@ obstacle_decision_node:
     avoidance_side_limit_cm: 22.0
     static_wait_s: 10.0
     enable_static_avoidance: true
+    enable_pre_avoidance_servo_validation: true
+    servo_validation_stop_cm: 20.0
+    servo_validation_timeout_s: 6.0
     front_clear_confirm_s: 0.40
     edge_near_max_cm: 45.0
     edge_far_min_cm: 60.0
@@ -45,7 +54,7 @@ obstacle_decision_node:
     esp_transition_fresh_s: 0.75
     esp_stale_timeout_s: 2.00
     startup_sensor_grace_s: 1.00
-    stop_repeat_s: 1.00
+    stop_repeat_s: 5.00
     motion_command_epsilon: 0.02
     rotation_command_epsilon: 0.10
     wheel_target_epsilon: 0.05
@@ -61,6 +70,7 @@ obstacle_decision_node:
     avoidance_stall_timeout_s: 3.0
     avoidance_progress_m: 0.02
     avoidance_pause_timeout_s: 0.0
+    max_static_replans: 4
     avoidance_measurement_mode: false
     avoidance_command_retry_s: 0.50
     pose_tolerance_m: 0.06
@@ -74,4 +84,6 @@ esp_http_bridge_node:
     poll_period_s: 0.25
     poll_timeout_s: 0.30
     command_timeout_s: 0.75
-    stop_heartbeat_s: 1.00
+    stop_heartbeat_s: 5.00
+    status_refresh_s: 10.0
+    poll_failure_backoff_s: 1.0

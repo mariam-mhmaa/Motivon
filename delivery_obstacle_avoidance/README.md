@@ -11,15 +11,46 @@ the ESP web endpoints from `Pose_Cascaded_GUI.ino`.
 - Runs on the Raspberry Pi 5.
 - Reads HC-SR04 sensors through `lgpio`.
 - Uses the shared trigger pin and the four echo pins from the test script.
-- Leaves servo GPIO output disabled for the first test, so the front/back
-  sensors must be positioned manually at center. Servo output and scanning can
-  be enabled later with `enable_servo_output: true` and
-  `enable_servo_scan: true`.
+- Keeps both sensors centered during normal driving. The front servo moves
+  only when the decision node requests a stationary detour-side check.
+- Servo PWM is not started during node startup, so launching the package does
+  not reposition the servos. PWM starts with the first validation request.
+- The front-servo PWM is disabled again immediately after each scan returns to
+  center, avoiding continuous servo current while the robot drives.
 - Sends one shared trigger pulse and captures all four echo lines from that
   measurement cycle. The default cycle is `80 ms`, above the HC-SR04 minimum
   recommended interval.
 - Publishes filtered JSON on `/obstacle/scan`.
 - Publishes every unfiltered measurement on `/obstacle/raw_scan`.
+
+### Front-servo detour validation
+
+Before ordinary forward static-obstacle avoidance starts, the robot remains
+stopped and compares both diagonal directions:
+
+1. The front sensor turns about 45 degrees toward the side initially preferred
+   by the fixed left/right sensors.
+2. Three readings are collected and their median is saved.
+3. The sensor returns to center, then repeats the scan for the other side.
+4. A scanned side is usable at any distance above
+   `servo_validation_stop_cm` (`20 cm`). There is no additional clearance
+   requirement.
+5. Among usable sides, the robot selects the side with the larger diagonal
+   median. The fixed side sensor must also remain above its normal stop limit.
+6. The front sensor returns to center before any movement command is sent.
+
+This version does not yet back up and rescan when both detour corridors are
+blocked.
+
+Calibrated front-servo pulses are `1100 us` right, `1500 us` center, and
+`1900 us` left. Useful terminal messages contain `FRONT SERVO VALIDATION`,
+followed by `FRONT SERVO SIDE COMPARISON COMPLETE`, which prints both medians
+and the selected side.
+
+The ten-second static timer continues while the stopped distance is anywhere
+below the `40 cm` clear threshold. This avoids becoming stuck in the dynamic
+waiting state when braking changes the reading from the `22 cm` stop distance
+to a slightly larger value.
 
 `esp_http_bridge_node`
 
@@ -98,23 +129,58 @@ the ESP web endpoints from `Pose_Cascaded_GUI.ino`.
   normal directional stop distance of `22 cm`: the robot stops, waits, and continues
   the unfinished leg after that direction clears beyond `40 cm`.
 - If a temporary obstacle blocks the active movement direction during
-  avoidance, the robot stops and waits without a time limit. This applies to
-  front, back, left, and right movement. Once that same direction remains
-  clear beyond its release distance, the exact unfinished avoidance target is
-  sent again and the maneuver continues.
+  avoidance, the robot stops. This applies to front, back, left, and right
+  movement. If that direction clears before `10 s` and remains beyond its
+  release distance, the exact unfinished avoidance target is sent again and
+  the maneuver continues.
+- If the new obstacle remains for `10 s`, it is treated as another static
+  obstacle. The interrupted temporary maneuver is discarded, but the final
+  destination and the original navigation line are retained. A new avoidance
+  maneuver starts from the robot's current pose using the sensor in the
+  blocked direction.
+- When one static avoidance is interrupted by another static obstacle, the
+  supervisor remembers which direction points back toward the previous
+  obstacle. That direction is removed from the next left/right or front/back
+  choice even if an ultrasonic dead zone reports it as clear. If the only
+  remaining direction is also within `22 cm`, the robot stops instead of
+  choosing a dangerous route. The direction memory remains active through the
+  additional avoidance and path return, then clears after the navigation line
+  is safely recovered so later independent obstacles use normal side choice.
+- This direction restriction is created only when a static avoidance is
+  interrupted by another persistent obstacle. Ordinary one-obstacle avoidance
+  continues choosing the larger valid clearance exactly as before. If the
+  second avoidance's local return would point back toward the remembered first
+  obstacle, that local return is skipped and the robot rejoins the navigation
+  path from its current cleared position.
+- Every moving stage of the second avoidance uses the same directional raw
+  sensor protection as normal avoidance: it stops at `22 cm`, waits until that
+  direction is clear beyond `40 cm`, then continues. Edge detection and body
+  margins remain unchanged.
+- After the additional static obstacle is cleared, the robot returns to the
+  furthest forward point already reached on the original navigation line,
+  rather than returning to the beginning of either avoidance maneuver. It
+  then resumes the original destination. The original destination command is
+  retried every `0.5 s` until ESP telemetry confirms that its displayed target
+  has changed from the temporary return waypoint back to the requested goal.
+- The demo navigation line is created from the robot pose at the moment an
+  operator pose is accepted to that requested destination. It works at any
+  absolute `x` and `y`; the path is not hard-coded to `y=0`.
+- Up to `max_static_replans`, currently four, may be started during one
+  destination command. Reaching the limit stops the robot and requires a
+  trial reset.
 - Aborts on stale sensor/ESP data, an active movement-stage timeout, missing
   pose data, or missing odometry progress. Waiting for a temporary directional
   obstacle does not consume the movement-stage timeout.
 - After one avoidance completes and the original destination resumes, the same
   detection sequence remains active for later obstacles on the route.
-- Version 1 does not build a second avoidance maneuver inside an unfinished
-  first maneuver. A new obstacle pauses the current step and the robot waits
-  for it to move away. If it is actually another static obstacle, the robot
-  safely remains stopped because nested avoidance is intentionally deferred.
 
 The launch terminal prints plain state changes beginning with `STATUS:`, and
 the ESP GUI shows the same text, current state code, front/left/right readings,
 reason, and whether a reset is required.
+
+The ESP GUI distinguishes the fixed final destination requested by the
+operator from the current movement waypoint. Avoidance temporarily changes the
+movement waypoint while the final destination remains unchanged.
 
 During the sideways part of static avoidance, the launch terminal also keeps
 two diagnostic lines in its history:
@@ -220,6 +286,56 @@ ROS is active, the GUI `Go To Pose`, `Reset Trial`, `Zero Pose`, and `IMU Cal`
 buttons are relayed through the same ROS supervisor used by terminal commands.
 The GUI also displays the current obstacle state and distance readings.
 
+## Two-Static-Obstacle Demo
+
+Use this first layout to test one static obstacle encountered while the robot
+is already avoiding another:
+
+1. Put the robot on a straight floor line with at least `1.3 m` free on each
+   side and about `2.8 m` free ahead. Zero the pose at this starting point.
+2. Use a straight destination of `x=3.00 m`, `y=0.00 m`, `yaw=0 deg`.
+   The same code also works when the starting path has another absolute `y`;
+   this zero-based line only makes the first measurements easier.
+3. Place obstacle A centered on the original floor line. Its near face should
+   be about `0.75 m` in front of the centered front sensor. Use the agreed
+   `0.40 m` width and `0.20 m` depth.
+4. Check the left/right readings before starting. The robot will choose the
+   side with the larger reading. Place obstacle B in that expected detour lane,
+   with its center about `0.55 m` sideways from the original line.
+5. Put B's near face about `0.75 m` beyond A's far face. This should make the
+   centered front sensor detect B during A's forward passing stage while still
+   leaving the normal `22 cm` stopping distance.
+
+Both obstacles remain stationary for the whole trial. Do not insert B by hand
+while the robot is moving.
+
+The expected important state sequence is:
+
+```text
+WAITING_DYNAMIC
+STATIC_STRAFE_FIND_EDGE
+STATIC_STRAFE_MARGIN
+STATIC_FORWARD_FIND_EDGE or STATIC_FORWARD_MARGIN
+AVOIDANCE_PAUSED
+STATIC_STRAFE_FIND_EDGE
+...
+STATIC_RETURN_PATH
+STATIC_NOMINAL_REJOIN
+CLEAR
+```
+
+`AVOIDANCE_PAUSED` should last about `10 s` for obstacle B. The next avoidance
+states are the new maneuver around B. `STATIC_NOMINAL_REJOIN` then commands the
+robot to the furthest forward point it has already reached on the original
+line before the final destination resumes.
+
+The terminal also prints the remembered direction toward obstacle A and the
+forced safe direction chosen for obstacle B. Servo scanning remains disabled
+for this test: continuous scanning would temporarily point the center sensor
+away from the movement direction, and the rear servo angles are not calibrated
+yet. The direction memory provides the extra dead-zone protection without
+reducing the current stop-response rate.
+
 After an operator STOP or unsuccessful avoidance, reset explicitly before
 starting the next trial:
 
@@ -264,6 +380,7 @@ http://192.168.1.112
 - Sensor stream stale timeout: `0.35 s`
 - Front clear confirmation: `0.40 s`
 - Dynamic/static threshold: `10 s`
+- Maximum additional static-obstacle replans per destination: `4`
 - Extra lateral travel after front edge: `0.34 m`
 - Extra forward travel after rear edge: `0.38 m`
 - For an obstacle encountered while strafing: extra front/back travel after

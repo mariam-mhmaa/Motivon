@@ -1,0 +1,97 @@
+import spidev
+import time
+
+# For 12V WS2811 strips:
+# Usually 3 physical LEDs = 1 controllable pixel.
+# Example: 60 physical LEDs -> NUM_PIXELS = 20
+NUM_PIXELS = 20
+
+SPI_SPEED = 2400000
+
+# If colors are wrong, try "RGB" instead of "GRB"
+COLOR_ORDER = "GRB"
+
+# Brightness values are 0 to 255.
+# Keep them low first to avoid high current.
+COLORS = [
+    ("Red",   (80, 0, 0)),
+    ("Green", (0, 80, 0)),
+    ("Blue",  (0, 0, 80)),
+    ("Yellow", (80, 80, 0)),
+    ("Cyan",   (0, 80, 80)),
+    ("Purple", (80, 0, 80)),
+    ("White",  (50, 50, 50)),
+    ("Off",    (0, 0, 0)),
+]
+
+DELAY_SECONDS = 1.0
+
+spi = spidev.SpiDev()
+spi.open(0, 0)          # /dev/spidev0.0 -> SPI0 MOSI -> GPIO10 / physical pin 19
+spi.max_speed_hz = SPI_SPEED
+spi.mode = 0
+
+
+def encode_byte(byte):
+    """
+    Encode one WS2811 byte into SPI bits.
+    WS2811 bit 1 -> 110
+    WS2811 bit 0 -> 100
+    """
+    bits = ""
+
+    for i in range(7, -1, -1):
+        if byte & (1 << i):
+            bits += "110"
+        else:
+            bits += "100"
+
+    out = []
+
+    for i in range(0, len(bits), 8):
+        chunk = bits[i:i + 8]
+        if len(chunk) < 8:
+            chunk += "0" * (8 - len(chunk))
+        out.append(int(chunk, 2))
+
+    return out
+
+
+def make_frame(r, g, b):
+    data = []
+
+    for _ in range(NUM_PIXELS):
+        if COLOR_ORDER == "GRB":
+            ordered = [g, r, b]
+        elif COLOR_ORDER == "RGB":
+            ordered = [r, g, b]
+        elif COLOR_ORDER == "BRG":
+            ordered = [b, r, g]
+        else:
+            ordered = [g, r, b]
+
+        for value in ordered:
+            data.extend(encode_byte(value))
+
+    # Reset/latch time
+    data.extend([0x00] * 100)
+
+    return data
+
+
+def set_all(r, g, b):
+    frame = make_frame(r, g, b)
+    spi.xfer3(frame)
+
+
+try:
+    while True:
+        for name, color in COLORS:
+            print(name)
+            set_all(*color)
+            time.sleep(DELAY_SECONDS)
+
+except KeyboardInterrupt:
+    set_all(0, 0, 0)
+    spi.close()
+    print("Stopped")
