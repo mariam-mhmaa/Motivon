@@ -9,5 +9,9 @@ wheel_odometry_node:
     odom_frame: odom
     base_frame: base_link
     maximum_sample_period_s: 0.25
+    stale_timeout_s: 0.50
+    stale_publish_period_s: 0.05
+    maximum_wheel_speed_rad_s: 20.0
+    wheel_delta_tolerance_rad: 0.50
     pose_covariance_diagonal: [0.05, 0.05, 1000000.0, 1000000.0, 1000000.0, 0.20]
     twist_covariance_diagonal: [0.02, 0.02, 1000000.0, 1000000.0, 1000000.0, 0.10]

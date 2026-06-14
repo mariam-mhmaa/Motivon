@@ -29,9 +29,18 @@ constexpr float ENCODER_PPR = 4080.0f;
 constexpr uint32_t CONTROL_PERIOD_MS = 20;
 constexpr float CONTROL_DT_S = CONTROL_PERIOD_MS / 1000.0f;
 constexpr uint32_t IMU_PERIOD_MS = 10;
+constexpr uint32_t WHEEL_TELEMETRY_PERIOD_MS = 40;
+constexpr uint32_t IMU_TELEMETRY_PERIOD_MS = 40;
+constexpr uint32_t STATUS_PERIOD_MS = 1000;
 constexpr uint32_t COMMAND_TIMEOUT_MS = 500;
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
+constexpr uint32_t WIFI_STATUS_PERIOD_MS = 1000;
 constexpr uint32_t AGENT_DISCOVERY_PERIOD_MS = 500;
-constexpr uint32_t AGENT_HEALTH_PERIOD_MS = 1000;
+constexpr uint32_t AGENT_HEALTH_PERIOD_MS = 10000;
+constexpr uint32_t AGENT_PING_TIMEOUT_MS = 100;
+constexpr uint8_t AGENT_PING_ATTEMPTS = 1;
+constexpr uint8_t AGENT_FAILURE_LIMIT = 6;
+constexpr uint8_t PUBLISH_FAILURE_LIMIT = 5;
 constexpr uint8_t IMU_FAILURE_LIMIT = 5;
 constexpr float FILTER_ALPHA = 0.25f;
 
@@ -175,7 +184,6 @@ rcl_publisher_t imu_ok_publisher;
 rcl_publisher_t heartbeat_publisher;
 rcl_subscription_t cmd_vel_subscription;
 rcl_subscription_t enable_subscription;
-rcl_timer_t telemetry_timer;
 rclc_executor_t executor;
 
 geometry_msgs__msg__Twist cmd_vel_message;
@@ -202,8 +210,124 @@ bool imu_ok_publisher_initialized = false;
 bool heartbeat_publisher_initialized = false;
 bool cmd_vel_subscription_initialized = false;
 bool enable_subscription_initialized = false;
-bool telemetry_timer_initialized = false;
 bool executor_initialized = false;
+
+void stopAllMotors();
+
+const char *wifiStatusName(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS:
+      return "IDLE";
+    case WL_NO_SSID_AVAIL:
+      return "SSID_NOT_FOUND";
+    case WL_SCAN_COMPLETED:
+      return "SCAN_COMPLETED";
+    case WL_CONNECTED:
+      return "CONNECTED";
+    case WL_CONNECT_FAILED:
+      return "AUTH_OR_CONNECT_FAILED";
+    case WL_CONNECTION_LOST:
+      return "CONNECTION_LOST";
+    case WL_DISCONNECTED:
+      return "DISCONNECTED";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+void logTargetWifiVisibility() {
+  Serial.println("[wifi] Scanning for the configured SSID");
+  const int network_count = WiFi.scanNetworks(false, true);
+  if (network_count < 0) {
+    Serial.printf("[wifi] Scan failed; result=%d\n", network_count);
+    return;
+  }
+
+  bool target_found = false;
+  for (int index = 0; index < network_count; ++index) {
+    if (WiFi.SSID(index) == MOTIVON_WIFI_SSID) {
+      target_found = true;
+      Serial.printf(
+          "[wifi] Target visible; RSSI=%d dBm channel=%d\n",
+          WiFi.RSSI(index),
+          WiFi.channel(index));
+    }
+  }
+  if (!target_found) {
+    Serial.printf(
+        "[wifi] Target SSID not visible: %s\n", MOTIVON_WIFI_SSID);
+  }
+  WiFi.scanDelete();
+}
+
+bool connectWifi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);
+
+  Serial.printf(
+      "[wifi] ESP32 MAC: %s\n", WiFi.macAddress().c_str());
+  Serial.printf("[wifi] Connecting to SSID: %s\n", MOTIVON_WIFI_SSID);
+  logTargetWifiVisibility();
+
+  WiFi.begin(MOTIVON_WIFI_SSID, MOTIVON_WIFI_PASSWORD);
+  const uint32_t started_ms = millis();
+  uint32_t last_status_ms = started_ms;
+
+  while (WiFi.status() != WL_CONNECTED) {
+    const uint32_t now_ms = millis();
+    if (static_cast<uint32_t>(now_ms - started_ms) >=
+        WIFI_CONNECT_TIMEOUT_MS) {
+      Serial.printf(
+          "[wifi] Connection failed after %lu ms; status=%s (%d)\n",
+          static_cast<unsigned long>(WIFI_CONNECT_TIMEOUT_MS),
+          wifiStatusName(WiFi.status()),
+          static_cast<int>(WiFi.status()));
+      return false;
+    }
+    if (static_cast<uint32_t>(now_ms - last_status_ms) >=
+        WIFI_STATUS_PERIOD_MS) {
+      last_status_ms = now_ms;
+      Serial.printf(
+          "[wifi] Waiting; status=%s (%d)\n",
+          wifiStatusName(WiFi.status()),
+          static_cast<int>(WiFi.status()));
+    }
+    delay(50);
+  }
+
+  Serial.printf(
+      "[wifi] Connected; IP=%s gateway=%s RSSI=%d dBm\n",
+      WiFi.localIP().toString().c_str(),
+      WiFi.gatewayIP().toString().c_str(),
+      WiFi.RSSI());
+  return true;
+}
+
+void configureMicroRosTransport() {
+  static micro_ros_agent_locator locator;
+  if (!locator.address.fromString(MOTIVON_AGENT_IP)) {
+    Serial.printf(
+        "[micro_ros] Invalid agent IP: %s\n", MOTIVON_AGENT_IP);
+    while (true) {
+      stopAllMotors();
+      delay(1000);
+    }
+  }
+  locator.port = MOTIVON_AGENT_PORT;
+  rmw_uros_set_custom_transport(
+      false,
+      static_cast<void *>(&locator),
+      arduino_wifi_transport_open,
+      arduino_wifi_transport_close,
+      arduino_wifi_transport_write,
+      arduino_wifi_transport_read);
+  Serial.printf(
+      "[micro_ros] Agent target: %s:%u\n",
+      MOTIVON_AGENT_IP,
+      static_cast<unsigned int>(MOTIVON_AGENT_PORT));
+}
 
 bool i2cWrite8(uint8_t address, uint8_t reg, uint8_t value) {
   Wire.beginTransmission(address);
@@ -555,11 +679,7 @@ void fillStamp(std_msgs__msg__Header &header) {
   }
 }
 
-void telemetryTimerCallback(rcl_timer_t *timer, int64_t) {
-  if (timer == nullptr) {
-    return;
-  }
-
+rcl_ret_t publishWheelTelemetry() {
   portENTER_CRITICAL(&telemetry_mux);
   for (size_t index = 0; index < 4; ++index) {
     wheel_states_message.velocity.data[index] = telemetry_velocity[index];
@@ -569,27 +689,36 @@ void telemetryTimerCallback(rcl_timer_t *timer, int64_t) {
   }
   portEXIT_CRITICAL(&telemetry_mux);
   fillStamp(wheel_states_message.header);
-  rcl_publish(&wheel_states_publisher, &wheel_states_message, nullptr);
+  return rcl_publish(
+      &wheel_states_publisher, &wheel_states_message, nullptr);
+}
 
+rcl_ret_t publishImuTelemetry() {
   portENTER_CRITICAL(&imu_mux);
   imu_message.angular_velocity.x = gyro_x_rad_s;
   imu_message.angular_velocity.y = gyro_y_rad_s;
   imu_message.angular_velocity.z = gyro_z_rad_s;
-  imu_ok_message.data = imu_ok;
   const bool publish_imu = imu_ok;
   portEXIT_CRITICAL(&imu_mux);
   if (publish_imu) {
     fillStamp(imu_message.header);
-    rcl_publish(&imu_publisher, &imu_message, nullptr);
+    return rcl_publish(&imu_publisher, &imu_message, nullptr);
   }
+  return RCL_RET_OK;
+}
 
-  static uint8_t status_divider = 0;
-  if (++status_divider >= 50) {
-    status_divider = 0;
-    ++heartbeat_message.data;
-    rcl_publish(&imu_ok_publisher, &imu_ok_message, nullptr);
-    rcl_publish(&heartbeat_publisher, &heartbeat_message, nullptr);
-  }
+rcl_ret_t publishStatusTelemetry() {
+  portENTER_CRITICAL(&imu_mux);
+  imu_ok_message.data = imu_ok;
+  portEXIT_CRITICAL(&imu_mux);
+  ++heartbeat_message.data;
+  const rcl_ret_t imu_status_result =
+      rcl_publish(&imu_ok_publisher, &imu_ok_message, nullptr);
+  const rcl_ret_t heartbeat_result =
+      rcl_publish(&heartbeat_publisher, &heartbeat_message, nullptr);
+  return imu_status_result != RCL_RET_OK
+             ? imu_status_result
+             : heartbeat_result;
 }
 
 bool initializeMessages() {
@@ -647,8 +776,16 @@ void resetEntityHandles() {
   heartbeat_publisher = rcl_get_zero_initialized_publisher();
   cmd_vel_subscription = rcl_get_zero_initialized_subscription();
   enable_subscription = rcl_get_zero_initialized_subscription();
-  telemetry_timer = rcl_get_zero_initialized_timer();
   executor = rclc_executor_t{};
+}
+
+void logCleanupResult(const char *entity_name, rcl_ret_t result) {
+  if (result != RCL_RET_OK) {
+    Serial.printf(
+        "[micro_ros] Cleanup failed for %s; result=%d\n",
+        entity_name,
+        static_cast<int>(result));
+  }
 }
 
 bool createEntities() {
@@ -719,17 +856,8 @@ bool createEntities() {
   }
   enable_subscription_initialized = true;
 
-  if (rclc_timer_init_default(
-          &telemetry_timer,
-          &support,
-          RCL_MS_TO_NS(CONTROL_PERIOD_MS),
-          telemetryTimerCallback) != RCL_RET_OK) {
-    return false;
-  }
-  telemetry_timer_initialized = true;
-
   if (rclc_executor_init(
-          &executor, &support.context, 3, &allocator) != RCL_RET_OK) {
+          &executor, &support.context, 2, &allocator) != RCL_RET_OK) {
     return false;
   }
   executor_initialized = true;
@@ -752,12 +880,13 @@ bool createEntities() {
     return false;
   }
 
-  if (rclc_executor_add_timer(
-          &executor, &telemetry_timer) != RCL_RET_OK) {
+  const rmw_ret_t sync_result = rmw_uros_sync_session(1000);
+  if (sync_result != RMW_RET_OK || !rmw_uros_epoch_synchronized()) {
+    Serial.printf(
+        "[micro_ros] Time synchronization failed; result=%d\n",
+        static_cast<int>(sync_result));
     return false;
   }
-
-  rmw_uros_sync_session(1000);
   return true;
 }
 
@@ -772,36 +901,44 @@ void destroyEntities() {
     rclc_executor_fini(&executor);
     executor_initialized = false;
   }
-  if (telemetry_timer_initialized) {
-    rcl_timer_fini(&telemetry_timer);
-    telemetry_timer_initialized = false;
-  }
   if (cmd_vel_subscription_initialized) {
-    rcl_subscription_fini(&cmd_vel_subscription, &node);
+    logCleanupResult(
+        "/cmd_vel subscription",
+        rcl_subscription_fini(&cmd_vel_subscription, &node));
     cmd_vel_subscription_initialized = false;
   }
   if (enable_subscription_initialized) {
-    rcl_subscription_fini(&enable_subscription, &node);
+    logCleanupResult(
+        "/base/enable subscription",
+        rcl_subscription_fini(&enable_subscription, &node));
     enable_subscription_initialized = false;
   }
   if (wheel_publisher_initialized) {
-    rcl_publisher_fini(&wheel_states_publisher, &node);
+    logCleanupResult(
+        "/base/wheel_states publisher",
+        rcl_publisher_fini(&wheel_states_publisher, &node));
     wheel_publisher_initialized = false;
   }
   if (imu_publisher_initialized) {
-    rcl_publisher_fini(&imu_publisher, &node);
+    logCleanupResult(
+        "/imu/data_raw publisher",
+        rcl_publisher_fini(&imu_publisher, &node));
     imu_publisher_initialized = false;
   }
   if (imu_ok_publisher_initialized) {
-    rcl_publisher_fini(&imu_ok_publisher, &node);
+    logCleanupResult(
+        "/base/imu_ok publisher",
+        rcl_publisher_fini(&imu_ok_publisher, &node));
     imu_ok_publisher_initialized = false;
   }
   if (heartbeat_publisher_initialized) {
-    rcl_publisher_fini(&heartbeat_publisher, &node);
+    logCleanupResult(
+        "/base/heartbeat publisher",
+        rcl_publisher_fini(&heartbeat_publisher, &node));
     heartbeat_publisher_initialized = false;
   }
   if (node_initialized) {
-    rcl_node_fini(&node);
+    logCleanupResult("esp32_base_node", rcl_node_fini(&node));
     node_initialized = false;
   }
   if (support_initialized) {
@@ -913,6 +1050,11 @@ void imuTask(void *) {
 void microRosTask(void *) {
   uint32_t last_discovery_ms = 0;
   uint32_t last_health_check_ms = 0;
+  uint32_t next_wheel_publish_ms = 0;
+  uint32_t next_imu_publish_ms = 0;
+  uint32_t next_status_publish_ms = 0;
+  uint8_t consecutive_health_failures = 0;
+  uint8_t consecutive_publish_failures = 0;
 
   while (true) {
     const uint32_t now_ms = millis();
@@ -931,6 +1073,11 @@ void microRosTask(void *) {
       case AGENT_AVAILABLE:
         if (createEntities()) {
           last_health_check_ms = now_ms;
+          next_wheel_publish_ms = now_ms;
+          next_imu_publish_ms = now_ms + 20;
+          next_status_publish_ms = now_ms + STATUS_PERIOD_MS;
+          consecutive_health_failures = 0;
+          consecutive_publish_failures = 0;
           agent_state = AGENT_CONNECTED;
         } else {
           destroyEntities();
@@ -938,30 +1085,87 @@ void microRosTask(void *) {
         }
         break;
 
-      case AGENT_CONNECTED:
-        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(5));
+      case AGENT_CONNECTED: {
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(1));
+
+        bool publish_attempted = false;
+        const char *published_topic = "";
+        rcl_ret_t publish_result = RCL_RET_OK;
+        if (static_cast<int32_t>(
+                now_ms - next_wheel_publish_ms) >= 0) {
+          publish_attempted = true;
+          published_topic = "/base/wheel_states";
+          publish_result = publishWheelTelemetry();
+          next_wheel_publish_ms =
+              millis() + WHEEL_TELEMETRY_PERIOD_MS;
+        } else if (static_cast<int32_t>(
+                       now_ms - next_imu_publish_ms) >= 0) {
+          publish_attempted = true;
+          published_topic = "/imu/data_raw";
+          publish_result = publishImuTelemetry();
+          next_imu_publish_ms =
+              millis() + IMU_TELEMETRY_PERIOD_MS;
+        } else if (static_cast<int32_t>(
+                       now_ms - next_status_publish_ms) >= 0) {
+          publish_attempted = true;
+          published_topic = "/base/status";
+          publish_result = publishStatusTelemetry();
+          next_status_publish_ms = millis() + STATUS_PERIOD_MS;
+        }
+
+        if (publish_attempted) {
+          if (publish_result == RCL_RET_OK) {
+            consecutive_publish_failures = 0;
+          } else {
+            ++consecutive_publish_failures;
+            Serial.printf(
+                "[micro_ros] Publish failed for %s; result=%d, "
+                "consecutive=%u\n",
+                published_topic,
+                static_cast<int>(publish_result),
+                static_cast<unsigned int>(consecutive_publish_failures));
+            if (
+                consecutive_publish_failures >=
+                PUBLISH_FAILURE_LIMIT) {
+              agent_state = AGENT_DISCONNECTED;
+            }
+          }
+        }
+        if (agent_state == AGENT_DISCONNECTED) {
+          break;
+        }
+
         if (static_cast<uint32_t>(now_ms - last_health_check_ms) <
             AGENT_HEALTH_PERIOD_MS) {
           break;
         }
         last_health_check_ms = now_ms;
-        if (rmw_uros_ping_agent(50, 1) != RMW_RET_OK) {
+        if (rmw_uros_ping_agent(
+                AGENT_PING_TIMEOUT_MS,
+                AGENT_PING_ATTEMPTS) == RMW_RET_OK) {
+          consecutive_health_failures = 0;
+        } else if (
+            ++consecutive_health_failures >= AGENT_FAILURE_LIMIT) {
           agent_state = AGENT_DISCONNECTED;
         }
         break;
+      }
 
       case AGENT_DISCONNECTED:
         destroyEntities();
+        consecutive_health_failures = 0;
+        consecutive_publish_failures = 0;
         agent_state = WAITING_FOR_AGENT;
         break;
     }
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
 
 void setup() {
   Serial.begin(115200);
   delay(500);
+  Serial.println("[boot] Motivon ESP32 base starting");
 
   setupWheelPins(wheel_fl);
   setupWheelPins(wheel_fr);
@@ -978,40 +1182,29 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(RL_ENC_B), isrRL, CHANGE);
   stopAllMotors();
 
+  while (!connectWifi()) {
+    stopAllMotors();
+    Serial.println("[wifi] Retrying in 5 seconds");
+    delay(5000);
+  }
+  configureMicroRosTransport();
+
   imu_initialized = bmi160Init();
   if (imu_initialized) {
     imu_initialized = calibrateGyro(1200);
   }
   imu_ok = imu_initialized;
+  Serial.printf(
+      "[imu] Initialization and calibration: %s\n",
+      imu_initialized ? "OK" : "FAILED");
 
   if (!initializeMessages()) {
+    Serial.println("[micro_ros] Message allocation failed");
     while (true) {
       stopAllMotors();
       delay(1000);
     }
   }
-
-  const IPAddress local_ip(
-      MOTIVON_ESP_IP_0,
-      MOTIVON_ESP_IP_1,
-      MOTIVON_ESP_IP_2,
-      MOTIVON_ESP_IP_3);
-  const IPAddress gateway(
-      MOTIVON_GATEWAY_IP_0,
-      MOTIVON_GATEWAY_IP_1,
-      MOTIVON_GATEWAY_IP_2,
-      MOTIVON_GATEWAY_IP_3);
-  const IPAddress subnet(255, 255, 255, 0);
-  WiFi.mode(WIFI_STA);
-  WiFi.persistent(false);
-  WiFi.setAutoReconnect(true);
-  WiFi.setSleep(false);
-  WiFi.config(local_ip, gateway, subnet);
-  set_microros_wifi_transports(
-      const_cast<char *>(MOTIVON_WIFI_SSID),
-      const_cast<char *>(MOTIVON_WIFI_PASSWORD),
-      const_cast<char *>(MOTIVON_AGENT_IP),
-      MOTIVON_AGENT_PORT);
 
   xTaskCreatePinnedToCore(
       controlTask, "motor_control", 4096, nullptr, 4, nullptr, 1);

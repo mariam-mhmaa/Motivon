@@ -4,7 +4,7 @@ import os
 from setuptools import find_packages, setup
 
 
-package_name = "motivon_bringup"
+package_name = "motivon_navigation"
 
 
 setup(
@@ -18,19 +18,24 @@ setup(
         ),
         ("share/" + package_name, ["package.xml"]),
         (
-            os.path.join("share", package_name, "launch"),
-            glob("launch/*.launch.py"),
-        ),
-        (
             os.path.join("share", package_name, "config"),
             glob("config/*.yaml"),
         ),
+        (
+            os.path.join("share", package_name, "launch"),
+            glob("launch/*.launch.py"),
+        ),
     ],
-    install_requires=["setuptools"],
+    install_requires=["setuptools", "PyYAML"],
     zip_safe=True,
     maintainer="Motivon Team",
     maintainer_email="student@example.com",
-    description="Launch and configuration for the Motivon real-robot base.",
+    description="Measured-corridor navigation for the real Motivon robot.",
     license="MIT",
     tests_require=["pytest"],
+    entry_points={
+        "console_scripts": [
+            "navigation_node = motivon_navigation.navigation_node:main",
+        ],
+    },
 )

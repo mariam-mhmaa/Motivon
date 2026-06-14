@@ -8,12 +8,76 @@ unchanged outside this directory.
 
 - `esp32_base_node`: ESP32 micro-ROS firmware with the tested wheel PID,
   encoders, BMI160 gyroscope, automatic gyro calibration, Wi-Fi UDP transport,
-  command timeout, measured IMU health, and rate-limited reconnect handling.
+  command timeout, measured IMU health, staggered sensor telemetry, and
+  debounced reconnect handling.
 - `wheel_odometry_node`: Raspberry Pi ROS 2 node that converts the four measured
-  wheel velocities into mecanum odometry.
+  wheel velocities into mecanum odometry and publishes zero velocity when the
+  ESP32 wheel-state stream becomes stale.
 - `ekf_filter_node`: `robot_localization` EKF configured to fuse wheel velocity
   and BMI160 yaw rate. The ESP32 measures gyro bias and stationary noise during
   every startup calibration and publishes that measured angular covariance.
+- `navigation_node`: Executes measured named routes using filtered odometry,
+  body-frame mecanum commands, cross-track correction, slow final approach,
+  acceleration limits, stale-odometry stopping, and typed action feedback.
+
+## Navigation coordinate frame
+
+The real 4.5 m by 4.5 m map uses the back-right arena corner nearest HOME as
+`(0.0, 0.0)`. From that corner, positive X points toward WP1 and positive Y
+points toward the robot's left at its starting pose. The robot center is the
+reference point.
+
+Configured HOME is `(0.65, 0.65)`, not map zero. This is intentional. Calling
+`/navigation/set_home` records which live odometry pose corresponds to that
+physical map coordinate and to starting yaw zero. It does not silently redefine
+an arbitrary stopping position as HOME.
+
+The route measurements are stored in
+`motivon_navigation/config/routes.yaml`, so corrected floor measurements do not
+require Python changes.
+
+## First WP1 navigation test
+
+The WP1 launch starts the base, EKF, micro-ROS agent, and navigation node. It
+does not start robot motion automatically.
+
+For inspection without motor output:
+
+```bash
+ros2 launch motivon_bringup wp1_navigation_test.launch.py
+```
+
+For the later supervised floor test, explicitly route navigation to the ESP32:
+
+```bash
+ros2 launch motivon_bringup wp1_navigation_test.launch.py \
+  command_topic:=/cmd_vel
+```
+
+Place the robot center at the marked HOME point and face it toward WP1. After
+fresh filtered odometry appears, set the map/odometry relationship:
+
+```bash
+ros2 service call /navigation/set_home std_srvs/srv/Trigger
+```
+
+Enable the base only when the test area is clear:
+
+```bash
+ros2 topic pub --once /base/enable std_msgs/msg/Bool "{data: true}"
+```
+
+Send only the first target with a ten-second stationary hold:
+
+```bash
+ros2 action send_goal /navigation/navigate_to_target \
+  motivon_interfaces/action/NavigateToTarget \
+  "{target_name: 'WP1', hold_time_s: 10.0}" --feedback
+```
+
+The action is rejected unless HOME has been set, no other goal is active, and
+the requested segment is the configured next segment. Launching or setting
+HOME never commands movement.
 
 ## ROS interface
 
@@ -48,11 +112,15 @@ rules prevent old or competing commands from repeatedly taking control.
 
 ## Raspberry Pi setup
 
-Install the required Jazzy packages:
+Install `robot_localization` from the Jazzy package repository:
 
 ```bash
-sudo apt install ros-jazzy-robot-localization ros-jazzy-micro-ros-agent
+sudo apt install ros-jazzy-robot-localization
 ```
+
+On Ubuntu 24.04 ARM64, build the Jazzy micro-ROS agent with
+`micro_ros_setup`; `ros-jazzy-micro-ros-agent` was not available from the
+configured package repository on the Raspberry Pi used for this project.
 
 Build from this directory:
 
@@ -70,6 +138,10 @@ ros2 launch motivon_bringup base_system.launch.py
 
 The agent listens on UDP port `8888`.
 
+The Raspberry Pi / micro-ROS agent is reserved at `192.168.1.111` on the home
+network. The ESP32 uses DHCP because it initiates the connection to the agent
+and does not require a fixed address. This avoids conflicts with other clients.
+
 ## ESP32 setup
 
 1. Install the Jazzy release of `micro_ros_arduino`.
@@ -82,10 +154,26 @@ The firmware uses the physical constants and corrected pin mapping from
 `PID/PID`. The old ESP32 HTTP GUI and outer pose controller are intentionally
 not part of integrated operation.
 
-The official Jazzy `micro_ros_arduino` documentation lists ESP32 Arduino core
-`2.0.2` as its supported ESP32 target. This sketch supports both PWM APIs and
-was compile-verified with `micro_ros_arduino 2.0.8-jazzy` on ESP32 core `3.3.8`.
-Hardware communication and timing still need to be verified on the robot.
+Use ESP32 Arduino core `2.0.2` with `micro_ros_arduino 2.0.8-jazzy`. This is
+the ESP32 core version supported by the official precompiled Jazzy library.
+Do not use an Iron Arduino client with the Jazzy agent. The sketch supports
+both core-2 and core-3 PWM APIs, but core `3.3.8` produced unusable Wi-Fi
+telemetry timing during hardware testing.
+
+Use only one ESP32 power source at a time. USB-only communication was stable;
+the robot-supplied 5 V path showed packet loss and latency and requires
+electrical investigation before autonomous operation.
+
+## Verification tools
+
+`tools/check_base_topics.py` checks ESP32 node discovery, all four telemetry
+topics, rates, maximum gaps, message contents, synchronized timestamps, and
+heartbeat continuity. It is a telemetry test, not a motor test.
+
+`tools/check_base_command_path.py` tests `/base/enable`, `/cmd_vel`, forward
+wheel response, and the 500 ms command watchdog. It refuses to run unless
+`--wheels-lifted` is supplied. Run it only after all drive wheels are physically
+off the floor and the robot power system is stable.
 
 ## First safe communication test
 
