@@ -26,7 +26,7 @@ from camera import get_client_camera
 # =========================
 # CAMERA CONFIG
 # =========================
-PI_CAMERA_HOST = "192.168.1.200"  # Change to your Raspberry Pi IP address
+PI_CAMERA_HOST = "192.168.1.111"  # Raspberry Pi IP address
 PI_CAMERA_PORT = 8888
 CAMERA_WIDTH = 240
 CAMERA_HEIGHT = 180
