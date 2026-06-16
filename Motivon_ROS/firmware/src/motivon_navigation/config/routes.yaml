@@ -1,0 +1,66 @@
+map:
+  frame_id: map
+  width_m: 4.5
+  height_m: 4.5
+  origin_description: back-right corner nearest HOME
+
+waypoints:
+  HOME:
+    x: 0.65
+    y: 0.65
+    role: home
+  WP1:
+    x: 1.75
+    y: 0.65
+    role: station
+  WP12:
+    x: 1.75
+    y: 3.30
+    role: connector
+  WP2:
+    x: 2.35
+    y: 3.30
+    role: station
+  WP23:
+    x: 2.35
+    y: 2.15
+    role: connector
+  WP3:
+    x: 3.85
+    y: 2.15
+    role: station
+  WP3b_ret:
+    x: 3.15
+    y: 2.15
+    role: connector
+  WP3a_ret:
+    x: 0.65
+    y: 2.15
+    role: connector
+
+paths:
+  HOME_to_WP1:
+    from: HOME
+    to: WP1
+    travel_yaw_deg: 0.0
+    align_before_travel: false
+    via: [WP1]
+  WP1_to_WP2:
+    from: WP1
+    to: WP2
+    travel_yaw_deg: 0.0
+    align_before_travel: false
+    via: [WP12, WP2]
+  WP2_to_WP3:
+    from: WP2
+    to: WP3
+    travel_yaw_deg: 0.0
+    align_before_travel: false
+    via: [WP23, WP3]
+  WP3_to_HOME:
+    from: WP3
+    to: HOME
+    travel_yaw_deg: 180.0
+    align_before_travel: true
+    final_yaw_deg: 0.0
+    via: [WP3b_ret, WP3a_ret, HOME]

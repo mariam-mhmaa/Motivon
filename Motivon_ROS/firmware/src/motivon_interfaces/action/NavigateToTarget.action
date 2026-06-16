@@ -1,0 +1,24 @@
+# Named map target and optional test dwell after accurate arrival.
+string target_name
+float32 hold_time_s
+---
+uint8 STATUS_SUCCEEDED=0
+uint8 STATUS_CANCELLED=1
+uint8 STATUS_REJECTED=2
+uint8 STATUS_ODOMETRY_LOST=3
+uint8 STATUS_INVALID_ROUTE=4
+uint8 STATUS_STALLED=5
+uint8 STATUS_INTERNAL_ERROR=6
+
+uint8 status
+string target_name
+string message
+float64 final_x_error_m
+float64 final_y_error_m
+float64 final_yaw_error_rad
+---
+string state
+string active_waypoint
+float64 distance_remaining_m
+float64 cross_track_error_m
+float64 yaw_error_rad

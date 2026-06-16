@@ -14,11 +14,12 @@ unchanged outside this directory.
   wheel velocities into mecanum odometry and publishes zero velocity when the
   ESP32 wheel-state stream becomes stale.
 - `ekf_filter_node`: `robot_localization` EKF configured to fuse wheel velocity
-  and BMI160 yaw rate. The ESP32 measures gyro bias and stationary noise during
-  every startup calibration and publishes that measured angular covariance.
+  for X/Y translation and BMI160 yaw rate for heading. Encoder-derived yaw is
+  deliberately excluded so wheel-speed imbalance cannot rotate the navigation
+  frame. The ESP32 measures gyro bias and stationary noise during startup.
 - `navigation_node`: Executes measured named routes using filtered odometry,
-  body-frame mecanum commands, cross-track correction, slow final approach,
-  acceleration limits, stale-odometry stopping, and typed action feedback.
+  conservative initial controller limits, stale-localization stopping with
+  stable-data recovery, and typed action feedback.
 
 ## Navigation coordinate frame
 
@@ -77,7 +78,32 @@ ros2 action send_goal /navigation/navigate_to_target \
 
 The action is rejected unless HOME has been set, no other goal is active, and
 the requested segment is the configured next segment. Launching or setting
-HOME never commands movement.
+HOME never commands movement. HOME -> WP1, WP1 -> WP2, and WP2 -> WP3 begin
+translation without a separate pre-rotation. The controller still corrects
+heading continuously while travelling. WP3 -> HOME performs the required
+180-degree turn, then aligns to the starting yaw after reaching HOME.
+
+## Supervised WP1 then WP2 test
+
+Do not change controller gains or odometry calibration for this test. Launch
+the same stack with navigation explicitly connected to the ESP32:
+
+```bash
+ros2 launch motivon_bringup wp1_navigation_test.launch.py \
+  command_topic:=/cmd_vel
+```
+
+Place the robot at HOME, face it toward WP1, wait for fresh localization, and
+call `/navigation/set_home` exactly once. Then run:
+
+```bash
+ros2 run motivon_navigation two_station_test --area-clear
+```
+
+The runner enables the base, sends WP1, waits for a successful result, then
+sends WP2. It stops and disables the base immediately if WP1 fails or either
+goal times out. The WP1-to-WP2 path first strafes left to `WP12`, then drives
+forward to `WP2`, while maintaining map yaw zero.
 
 ## ROS interface
 
@@ -106,7 +132,7 @@ The Raspberry Pi publishes:
 
 Only the future `cmd_vel_gate_node` may publish `/cmd_vel` in the complete
 system. During base testing, publish test commands from one terminal only.
-The ESP32 stops after 500 ms without a fresh command, starts disabled after
+The ESP32 stops after 750 ms without a fresh command, starts disabled after
 boot or micro-ROS reconnection, and never accepts pose targets directly. These
 rules prevent old or competing commands from repeatedly taking control.
 
@@ -164,6 +190,10 @@ Use only one ESP32 power source at a time. USB-only communication was stable;
 the robot-supplied 5 V path showed packet loss and latency and requires
 electrical investigation before autonomous operation.
 
+Do not run floor navigation unless `tools/check_base_topics.py` and the
+wheels-lifted `tools/check_motion_continuity.py` test both pass using the same
+power source that will be used for navigation.
+
 ## Verification tools
 
 `tools/check_base_topics.py` checks ESP32 node discovery, all four telemetry
@@ -171,7 +201,7 @@ topics, rates, maximum gaps, message contents, synchronized timestamps, and
 heartbeat continuity. It is a telemetry test, not a motor test.
 
 `tools/check_base_command_path.py` tests `/base/enable`, `/cmd_vel`, forward
-wheel response, and the 500 ms command watchdog. It refuses to run unless
+wheel response, and the 750 ms command watchdog. It refuses to run unless
 `--wheels-lifted` is supplied. Run it only after all drive wheels are physically
 off the floor and the robot power system is stable.
 

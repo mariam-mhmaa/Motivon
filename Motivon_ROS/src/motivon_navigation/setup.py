@@ -36,6 +36,14 @@ setup(
     entry_points={
         "console_scripts": [
             "navigation_node = motivon_navigation.navigation_node:main",
+            (
+                "two_station_test = "
+                "motivon_navigation.two_station_test:main"
+            ),
+            (
+                "three_station_test = "
+                "motivon_navigation.three_station_test:main"
+            ),
         ],
     },
 )

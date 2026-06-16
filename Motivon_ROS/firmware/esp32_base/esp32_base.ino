@@ -32,15 +32,17 @@ constexpr uint32_t IMU_PERIOD_MS = 10;
 constexpr uint32_t WHEEL_TELEMETRY_PERIOD_MS = 40;
 constexpr uint32_t IMU_TELEMETRY_PERIOD_MS = 40;
 constexpr uint32_t STATUS_PERIOD_MS = 1000;
-constexpr uint32_t COMMAND_TIMEOUT_MS = 500;
+constexpr uint32_t COMMAND_TIMEOUT_MS = 750;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
-constexpr uint32_t WIFI_STATUS_PERIOD_MS = 1000;
-constexpr uint32_t AGENT_DISCOVERY_PERIOD_MS = 500;
+constexpr uint32_t WIFI_RETRY_DELAY_MS = 2000;
+constexpr uint32_t AGENT_DISCOVERY_PERIOD_MS = 2000;
 constexpr uint32_t AGENT_HEALTH_PERIOD_MS = 10000;
-constexpr uint32_t AGENT_PING_TIMEOUT_MS = 100;
-constexpr uint8_t AGENT_PING_ATTEMPTS = 1;
+constexpr uint32_t AGENT_DISCOVERY_PING_TIMEOUT_MS = 50;
+constexpr uint8_t AGENT_DISCOVERY_PING_ATTEMPTS = 1;
+constexpr uint32_t AGENT_HEALTH_PING_TIMEOUT_MS = 100;
+constexpr uint8_t AGENT_HEALTH_PING_ATTEMPTS = 2;
 constexpr uint8_t AGENT_FAILURE_LIMIT = 6;
-constexpr uint8_t PUBLISH_FAILURE_LIMIT = 5;
+constexpr uint8_t PUBLISH_FAILURE_LIMIT = 20;
 constexpr uint8_t IMU_FAILURE_LIMIT = 5;
 constexpr float FILTER_ALPHA = 0.25f;
 
@@ -152,6 +154,7 @@ Wheel wheel_rl = {
 portMUX_TYPE command_mux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE imu_mux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE agent_state_mux = portMUX_INITIALIZER_UNLOCKED;
 
 float requested_vx = 0.0f;
 float requested_vy = 0.0f;
@@ -200,7 +203,7 @@ enum AgentState {
   AGENT_DISCONNECTED
 };
 
-volatile AgentState agent_state = WAITING_FOR_AGENT;
+AgentState agent_state = WAITING_FOR_AGENT;
 bool messages_initialized = false;
 bool support_initialized = false;
 bool node_initialized = false;
@@ -214,53 +217,32 @@ bool executor_initialized = false;
 
 void stopAllMotors();
 
-const char *wifiStatusName(wl_status_t status) {
-  switch (status) {
-    case WL_IDLE_STATUS:
-      return "IDLE";
-    case WL_NO_SSID_AVAIL:
-      return "SSID_NOT_FOUND";
-    case WL_SCAN_COMPLETED:
-      return "SCAN_COMPLETED";
-    case WL_CONNECTED:
-      return "CONNECTED";
-    case WL_CONNECT_FAILED:
-      return "AUTH_OR_CONNECT_FAILED";
-    case WL_CONNECTION_LOST:
-      return "CONNECTION_LOST";
-    case WL_DISCONNECTED:
-      return "DISCONNECTED";
-    default:
-      return "UNKNOWN";
-  }
+void requestBaseStop() {
+  portENTER_CRITICAL(&command_mux);
+  base_enabled = false;
+  requested_vx = 0.0f;
+  requested_vy = 0.0f;
+  requested_wz = 0.0f;
+  last_cmd_vel_ms = 0;
+  portEXIT_CRITICAL(&command_mux);
 }
 
-void logTargetWifiVisibility() {
-  Serial.println("[wifi] Scanning for the configured SSID");
-  const int network_count = WiFi.scanNetworks(false, true);
-  if (network_count < 0) {
-    Serial.printf("[wifi] Scan failed; result=%d\n", network_count);
-    return;
-  }
+AgentState getAgentState() {
+  portENTER_CRITICAL(&agent_state_mux);
+  const AgentState state = agent_state;
+  portEXIT_CRITICAL(&agent_state_mux);
+  return state;
+}
 
-  bool target_found = false;
-  for (int index = 0; index < network_count; ++index) {
-    if (WiFi.SSID(index) == MOTIVON_WIFI_SSID) {
-      target_found = true;
-      Serial.printf(
-          "[wifi] Target visible; RSSI=%d dBm channel=%d\n",
-          WiFi.RSSI(index),
-          WiFi.channel(index));
-    }
-  }
-  if (!target_found) {
-    Serial.printf(
-        "[wifi] Target SSID not visible: %s\n", MOTIVON_WIFI_SSID);
-  }
-  WiFi.scanDelete();
+void setAgentState(AgentState state) {
+  portENTER_CRITICAL(&agent_state_mux);
+  agent_state = state;
+  portEXIT_CRITICAL(&agent_state_mux);
 }
 
 bool connectWifi() {
+  WiFi.disconnect(true);
+  delay(100);
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
@@ -269,30 +251,19 @@ bool connectWifi() {
   Serial.printf(
       "[wifi] ESP32 MAC: %s\n", WiFi.macAddress().c_str());
   Serial.printf("[wifi] Connecting to SSID: %s\n", MOTIVON_WIFI_SSID);
-  logTargetWifiVisibility();
 
   WiFi.begin(MOTIVON_WIFI_SSID, MOTIVON_WIFI_PASSWORD);
   const uint32_t started_ms = millis();
-  uint32_t last_status_ms = started_ms;
 
   while (WiFi.status() != WL_CONNECTED) {
     const uint32_t now_ms = millis();
     if (static_cast<uint32_t>(now_ms - started_ms) >=
         WIFI_CONNECT_TIMEOUT_MS) {
       Serial.printf(
-          "[wifi] Connection failed after %lu ms; status=%s (%d)\n",
+          "[wifi] Connection failed after %lu ms; status=%d\n",
           static_cast<unsigned long>(WIFI_CONNECT_TIMEOUT_MS),
-          wifiStatusName(WiFi.status()),
           static_cast<int>(WiFi.status()));
       return false;
-    }
-    if (static_cast<uint32_t>(now_ms - last_status_ms) >=
-        WIFI_STATUS_PERIOD_MS) {
-      last_status_ms = now_ms;
-      Serial.printf(
-          "[wifi] Waiting; status=%s (%d)\n",
-          wifiStatusName(WiFi.status()),
-          static_cast<int>(WiFi.status()));
     }
     delay(50);
   }
@@ -820,7 +791,7 @@ bool createEntities() {
   }
   imu_publisher_initialized = true;
 
-  if (rclc_publisher_init_default(
+  if (rclc_publisher_init_best_effort(
           &imu_ok_publisher,
           &node,
           ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
@@ -982,7 +953,10 @@ void controlTask(void *) {
         last_command != 0 &&
         static_cast<uint32_t>(millis() - last_command) <= COMMAND_TIMEOUT_MS;
 
-    if (enabled && command_fresh && agent_state == AGENT_CONNECTED) {
+    if (
+        enabled &&
+        command_fresh &&
+        getAgentState() == AGENT_CONNECTED) {
       setBodyVelocityTargets(vx, vy, wz);
     } else {
       setBodyVelocityTargets(0.0f, 0.0f, 0.0f);
@@ -1049,39 +1023,55 @@ void imuTask(void *) {
 
 void microRosTask(void *) {
   uint32_t last_discovery_ms = 0;
-  uint32_t last_health_check_ms = 0;
   uint32_t next_wheel_publish_ms = 0;
   uint32_t next_imu_publish_ms = 0;
   uint32_t next_status_publish_ms = 0;
-  uint8_t consecutive_health_failures = 0;
   uint8_t consecutive_publish_failures = 0;
 
   while (true) {
     const uint32_t now_ms = millis();
-    switch (agent_state) {
+
+    if (WiFi.status() != WL_CONNECTED) {
+      requestBaseStop();
+      const AgentState state = getAgentState();
+      if (state == AGENT_CONNECTED || state == AGENT_AVAILABLE) {
+        destroyEntities();
+      }
+      setAgentState(WAITING_FOR_AGENT);
+      consecutive_publish_failures = 0;
+
+      while (!connectWifi()) {
+        requestBaseStop();
+        delay(WIFI_RETRY_DELAY_MS);
+      }
+      last_discovery_ms = millis() - AGENT_DISCOVERY_PERIOD_MS;
+      continue;
+    }
+
+    switch (getAgentState()) {
       case WAITING_FOR_AGENT:
         if (static_cast<uint32_t>(now_ms - last_discovery_ms) <
             AGENT_DISCOVERY_PERIOD_MS) {
           break;
         }
         last_discovery_ms = now_ms;
-        if (rmw_uros_ping_agent(100, 1) == RMW_RET_OK) {
-          agent_state = AGENT_AVAILABLE;
+        if (rmw_uros_ping_agent(
+                AGENT_DISCOVERY_PING_TIMEOUT_MS,
+                AGENT_DISCOVERY_PING_ATTEMPTS) == RMW_RET_OK) {
+          setAgentState(AGENT_AVAILABLE);
         }
         break;
 
       case AGENT_AVAILABLE:
         if (createEntities()) {
-          last_health_check_ms = now_ms;
           next_wheel_publish_ms = now_ms;
           next_imu_publish_ms = now_ms + 20;
           next_status_publish_ms = now_ms + STATUS_PERIOD_MS;
-          consecutive_health_failures = 0;
           consecutive_publish_failures = 0;
-          agent_state = AGENT_CONNECTED;
+          setAgentState(AGENT_CONNECTED);
         } else {
           destroyEntities();
-          agent_state = WAITING_FOR_AGENT;
+          setAgentState(WAITING_FOR_AGENT);
         }
         break;
 
@@ -1127,35 +1117,20 @@ void microRosTask(void *) {
             if (
                 consecutive_publish_failures >=
                 PUBLISH_FAILURE_LIMIT) {
-              agent_state = AGENT_DISCONNECTED;
+              setAgentState(AGENT_DISCONNECTED);
             }
           }
         }
-        if (agent_state == AGENT_DISCONNECTED) {
+        if (getAgentState() == AGENT_DISCONNECTED) {
           break;
-        }
-
-        if (static_cast<uint32_t>(now_ms - last_health_check_ms) <
-            AGENT_HEALTH_PERIOD_MS) {
-          break;
-        }
-        last_health_check_ms = now_ms;
-        if (rmw_uros_ping_agent(
-                AGENT_PING_TIMEOUT_MS,
-                AGENT_PING_ATTEMPTS) == RMW_RET_OK) {
-          consecutive_health_failures = 0;
-        } else if (
-            ++consecutive_health_failures >= AGENT_FAILURE_LIMIT) {
-          agent_state = AGENT_DISCONNECTED;
         }
         break;
       }
 
       case AGENT_DISCONNECTED:
         destroyEntities();
-        consecutive_health_failures = 0;
         consecutive_publish_failures = 0;
-        agent_state = WAITING_FOR_AGENT;
+        setAgentState(WAITING_FOR_AGENT);
         break;
     }
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -1184,8 +1159,8 @@ void setup() {
 
   while (!connectWifi()) {
     stopAllMotors();
-    Serial.println("[wifi] Retrying in 5 seconds");
-    delay(5000);
+    Serial.println("[wifi] Retrying connection");
+    delay(WIFI_RETRY_DELAY_MS);
   }
   configureMicroRosTransport();
 

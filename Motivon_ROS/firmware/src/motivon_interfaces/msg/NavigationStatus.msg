@@ -1,0 +1,9 @@
+builtin_interfaces/Time stamp
+string state
+string target_name
+string active_waypoint
+float64 distance_remaining_m
+float64 cross_track_error_m
+float64 yaw_error_rad
+bool home_set
+string detail
