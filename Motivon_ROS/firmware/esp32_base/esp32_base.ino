@@ -36,6 +36,8 @@ constexpr uint32_t COMMAND_TIMEOUT_MS = 750;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 constexpr uint32_t WIFI_RETRY_DELAY_MS = 2000;
 constexpr uint32_t AGENT_DISCOVERY_PERIOD_MS = 2000;
+constexpr uint32_t AGENT_DISCOVERY_RESTART_TIMEOUT_MS = 60000;
+constexpr uint8_t AGENT_DISCOVERY_RESTART_FAILURE_LIMIT = 30;
 constexpr uint32_t AGENT_HEALTH_PERIOD_MS = 10000;
 constexpr uint32_t AGENT_DISCOVERY_PING_TIMEOUT_MS = 50;
 constexpr uint8_t AGENT_DISCOVERY_PING_ATTEMPTS = 1;
@@ -1090,11 +1092,23 @@ void restartIfRequested() {
   ESP.restart();
 }
 
+void restartAfterAgentDiscoveryTimeout(uint32_t waited_ms) {
+  requestBaseStop();
+  stopAllMotors();
+  Serial.printf(
+      "[micro_ros] Agent discovery failed for %lu ms; restarting ESP32.\n",
+      static_cast<unsigned long>(waited_ms));
+  delay(100);
+  ESP.restart();
+}
+
 void microRosTask(void *) {
   uint32_t last_discovery_ms = 0;
+  uint32_t agent_discovery_started_ms = millis();
   uint32_t next_wheel_publish_ms = 0;
   uint32_t next_imu_publish_ms = 0;
   uint32_t next_status_publish_ms = 0;
+  uint8_t consecutive_discovery_failures = 0;
   uint8_t consecutive_publish_failures = 0;
 
   while (true) {
@@ -1113,7 +1127,9 @@ void microRosTask(void *) {
         requestBaseStop();
         delay(WIFI_RETRY_DELAY_MS);
       }
+      agent_discovery_started_ms = millis();
       last_discovery_ms = millis() - AGENT_DISCOVERY_PERIOD_MS;
+      consecutive_discovery_failures = 0;
       continue;
     }
 
@@ -1131,12 +1147,27 @@ void microRosTask(void *) {
               "[micro_ros] Agent reachable at %s:%u\n",
               MOTIVON_AGENT_IP,
               static_cast<unsigned int>(MOTIVON_AGENT_PORT));
+          consecutive_discovery_failures = 0;
           setAgentState(AGENT_AVAILABLE);
         } else {
+          if (consecutive_discovery_failures < 255) {
+            ++consecutive_discovery_failures;
+          }
           Serial.printf(
-              "[micro_ros] Agent ping failed at %s:%u\n",
+              "[micro_ros] Agent ping failed at %s:%u; failure=%u/%u\n",
               MOTIVON_AGENT_IP,
-              static_cast<unsigned int>(MOTIVON_AGENT_PORT));
+              static_cast<unsigned int>(MOTIVON_AGENT_PORT),
+              static_cast<unsigned int>(consecutive_discovery_failures),
+              static_cast<unsigned int>(
+                  AGENT_DISCOVERY_RESTART_FAILURE_LIMIT));
+          const uint32_t discovery_wait_ms =
+              static_cast<uint32_t>(now_ms - agent_discovery_started_ms);
+          if (
+              consecutive_discovery_failures >=
+                  AGENT_DISCOVERY_RESTART_FAILURE_LIMIT ||
+              discovery_wait_ms >= AGENT_DISCOVERY_RESTART_TIMEOUT_MS) {
+            restartAfterAgentDiscoveryTimeout(discovery_wait_ms);
+          }
         }
         break;
 
@@ -1153,6 +1184,8 @@ void microRosTask(void *) {
         } else {
           Serial.println("[micro_ros] Entity creation failed; retrying.");
           destroyEntities();
+          agent_discovery_started_ms = millis();
+          consecutive_discovery_failures = 0;
           setAgentState(WAITING_FOR_AGENT);
         }
         break;
@@ -1213,6 +1246,8 @@ void microRosTask(void *) {
       case AGENT_DISCONNECTED:
         destroyEntities();
         consecutive_publish_failures = 0;
+        agent_discovery_started_ms = millis();
+        consecutive_discovery_failures = 0;
         setAgentState(WAITING_FOR_AGENT);
         break;
     }

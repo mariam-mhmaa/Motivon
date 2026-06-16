@@ -20,22 +20,23 @@ def test_initial_navigation_limits_match_confirmed_configuration():
         document = yaml.safe_load(stream)
     parameters = document["navigation_node"]["ros__parameters"]
 
-    assert parameters["maximum_speed_mps"] == 0.08
-    assert parameters["maximum_cross_track_speed_mps"] == 0.05
+    assert parameters["maximum_speed_mps"] == 0.12
+    assert parameters["maximum_cross_track_speed_mps"] == 0.08
     assert parameters["maximum_turn_rate_rad_s"] == 0.30
-    assert parameters["maximum_linear_acceleration_mps2"] == 0.20
+    assert parameters["maximum_linear_acceleration_mps2"] == 0.25
     assert parameters["maximum_angular_acceleration_rad_s2"] == 0.60
     assert parameters["along_track_gain"] == 0.80
     assert parameters["cross_track_gain"] == 1.0
     assert parameters["final_position_gain"] == 0.80
     assert parameters["yaw_hold_gain"] == 1.50
-    assert parameters["yaw_alignment_gain"] == 1.50
+    assert parameters["yaw_alignment_gain"] == 1.20
     assert parameters["final_approach_radius_m"] == 0.30
     assert parameters["station_tolerance_m"] == 0.05
     assert parameters["home_tolerance_m"] == 0.05
-    assert parameters["yaw_tolerance_rad"] == 0.05
+    assert parameters["yaw_tolerance_rad"] == 0.035
     assert parameters["connector_tolerance_m"] == 0.10
     assert parameters["arrival_settle_samples"] == 10
+    assert parameters["yaw_settle_samples"] == 18
     assert parameters["odometry_topic"] == "/odometry/filtered"
     assert parameters["odometry_stale_timeout_s"] == 0.30
     assert parameters["odometry_abort_timeout_s"] == 5.00

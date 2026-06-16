@@ -34,6 +34,44 @@ def test_publish_failure_limit_requires_a_sustained_outage():
     assert constant_value(source, "PUBLISH_FAILURE_LIMIT") == 20
 
 
+def test_agent_discovery_failure_restarts_esp_after_sustained_outage():
+    source = FIRMWARE.read_text(encoding="utf-8")
+
+    restart_timeout_ms = constant_value(
+        source, "AGENT_DISCOVERY_RESTART_TIMEOUT_MS"
+    )
+    restart_failure_limit = constant_value(
+        source, "AGENT_DISCOVERY_RESTART_FAILURE_LIMIT"
+    )
+    micro_ros_task_start = source.index("void microRosTask")
+    waiting_case_start = source.index(
+        "case WAITING_FOR_AGENT:", micro_ros_task_start
+    )
+    waiting_case = source[
+        waiting_case_start : source.index(
+            "case AGENT_AVAILABLE:", micro_ros_task_start
+        )
+    ]
+    restart_helper = source[
+        source.index("void restartAfterAgentDiscoveryTimeout")
+        : source.index("void microRosTask")
+    ]
+    connected_case = source[
+        source.index("case AGENT_CONNECTED:", micro_ros_task_start)
+        : source.index("case AGENT_DISCONNECTED:", micro_ros_task_start)
+    ]
+
+    assert restart_timeout_ms >= 60000
+    assert restart_failure_limit == 30
+    assert "Agent ping failed" in waiting_case
+    assert "consecutive_discovery_failures" in waiting_case
+    assert "restartAfterAgentDiscoveryTimeout(discovery_wait_ms);" in waiting_case
+    assert "requestBaseStop();" in restart_helper
+    assert "stopAllMotors();" in restart_helper
+    assert "ESP.restart();" in restart_helper
+    assert "restartAfterAgentDiscoveryTimeout" not in connected_case
+
+
 def test_connected_micro_ros_loop_does_not_block_on_agent_ping():
     source = FIRMWARE.read_text(encoding="utf-8")
 
