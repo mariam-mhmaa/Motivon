@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+
+import argparse
 import lgpio
 import time
 
@@ -15,21 +18,27 @@ PWM_DUTY = 40
 
 OPEN_TARGET = 40000
 CLOSE_TARGET = 40000
+MOVE_TIMEOUT_S = 10.0
 
 ticks = 0
 last_a = 0
 
-h = lgpio.gpiochip_open(CHIP)
+h = None
 
-lgpio.gpio_claim_output(h, DIR1, 0)
-lgpio.gpio_claim_output(h, DIR2, 0)
-lgpio.gpio_claim_output(h, PWM, 0)
 
-lgpio.gpio_claim_input(h, ENC_A)
-lgpio.gpio_claim_input(h, ENC_B)
+def setup_gpio():
+    global h
+    h = lgpio.gpiochip_open(CHIP)
+    lgpio.gpio_claim_output(h, DIR1, 0)
+    lgpio.gpio_claim_output(h, DIR2, 0)
+    lgpio.gpio_claim_output(h, PWM, 0)
+    lgpio.gpio_claim_input(h, ENC_A)
+    lgpio.gpio_claim_input(h, ENC_B)
 
 
 def stop_motor():
+    if h is None:
+        return
     lgpio.tx_pwm(h, PWM, PWM_FREQ, 0)
     lgpio.gpio_write(h, DIR1, 0)
     lgpio.gpio_write(h, DIR2, 0)
@@ -73,14 +82,19 @@ def open_box():
     print("Opening...")
 
     motor_open()
+    start_time = time.time()
     last_print = time.time()
 
-    while ticks < OPEN_TARGET:
+    while abs(ticks) < OPEN_TARGET:
         update_encoder()
 
         if time.time() - last_print > 0.05:
             print(f"Ticks: {ticks}", end="\r")
             last_print = time.time()
+
+        if time.time() - start_time > MOVE_TIMEOUT_S:
+            print("\nOpen timeout reached.")
+            break
 
     stop_motor()
     print(f"\nOpened. Final ticks = {ticks}")
@@ -93,14 +107,19 @@ def close_box():
     print("Closing...")
 
     motor_close()
+    start_time = time.time()
     last_print = time.time()
 
-    while ticks > CLOSE_TARGET:
+    while abs(ticks) < CLOSE_TARGET:
         update_encoder()
 
         if time.time() - last_print > 0.05:
             print(f"Ticks: {ticks}", end="\r")
             last_print = time.time()
+
+        if time.time() - start_time > MOVE_TIMEOUT_S:
+            print("\nClose timeout reached.")
+            break
 
     stop_motor()
     print(f"\nClosed. Final ticks = {ticks}")
@@ -108,10 +127,10 @@ def close_box():
     print("Encoder reset to 0.")
 
 
-try:
+def run_interactive():
     print("Box lid motor control")
-    print("o = open to +14000 ticks")
-    print("c = close to -7000 ticks")
+    print(f"o = open to {OPEN_TARGET} encoder ticks")
+    print(f"c = close to {CLOSE_TARGET} encoder ticks")
     print("s = stop and reset")
     print("q = quit\n")
 
@@ -137,9 +156,39 @@ try:
         else:
             print("Use o, c, s, or q.")
 
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Box lid motor control")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("open", "close", "stop"),
+        help="Optional one-shot command. Omit for interactive mode.",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    setup_gpio()
+
+    if args.command == "open":
+        open_box()
+    elif args.command == "close":
+        close_box()
+    elif args.command == "stop":
+        stop_motor()
+        reset_encoder()
+        print("Stopped and encoder reset to 0.")
+    else:
+        run_interactive()
+
+
+try:
+    main()
 except KeyboardInterrupt:
     print("\nStopped by user.")
-
 finally:
     stop_motor()
-    lgpio.gpiochip_close(h)
+    if h is not None:
+        lgpio.gpiochip_close(h)

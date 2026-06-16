@@ -56,6 +56,7 @@ paths:
     to: WP3
     travel_yaw_deg: 0.0
     align_before_travel: false
+    final_yaw_deg: 180.0
     via: [WP23, WP3]
   WP3_to_HOME:
     from: WP3

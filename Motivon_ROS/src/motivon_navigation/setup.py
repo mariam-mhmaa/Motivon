@@ -44,6 +44,10 @@ setup(
                 "three_station_test = "
                 "motivon_navigation.three_station_test:main"
             ),
+            (
+                "full_path_test = "
+                "motivon_navigation.full_path_test:main"
+            ),
         ],
     },
 )

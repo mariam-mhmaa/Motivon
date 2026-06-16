@@ -35,6 +35,9 @@ def test_fixed_route_segments_and_return_rotations():
     assert not route_map.path_between(
         "WP2", "WP3"
     ).align_before_travel
+    assert math.isclose(
+        route_map.path_between("WP2", "WP3").final_yaw, math.pi
+    )
     return_path = route_map.path_between("WP3", "HOME")
     assert return_path.waypoint_names == [
         "WP3b_ret",

@@ -11,12 +11,12 @@ from rclpy.node import Node
 from std_msgs.msg import Bool
 
 
-TARGETS = ("WP1", "WP2", "WP3")
+TARGETS = ("WP1", "WP2", "WP3", "HOME")
 
 
-class ThreeStationTest(Node):
+class FullPathTest(Node):
     def __init__(self) -> None:
-        super().__init__("three_station_navigation_test")
+        super().__init__("full_path_navigation_test")
         self.action_client = ActionClient(
             self,
             NavigateToTarget,
@@ -139,12 +139,13 @@ class ThreeStationTest(Node):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Run the supervised HOME -> WP1 -> WP2 -> WP3 test. "
-            "The WP3 segment finishes by aligning to 180 degrees."
+            "Run the supervised HOME -> WP1 -> WP2 -> WP3 -> HOME test. "
+            "The return path uses WP3b_ret and WP3a_ret, then finishes at "
+            "HOME aligned to 180 degrees."
         )
     )
     parser.add_argument("--hold-time", type=float, default=10.0)
-    parser.add_argument("--target-timeout", type=float, default=140.0)
+    parser.add_argument("--target-timeout", type=float, default=160.0)
     parser.add_argument(
         "--area-clear",
         action="store_true",
@@ -157,7 +158,8 @@ def main(args=None) -> int:
     parsed = parse_args()
     if not parsed.area_clear:
         raise SystemExit(
-            "REFUSED: clear HOME -> WP1 -> WP2 -> WP3 and add --area-clear"
+            "REFUSED: clear HOME -> WP1 -> WP2 -> WP3 -> HOME and "
+            "add --area-clear"
         )
     if (
         not math.isfinite(parsed.hold_time)
@@ -168,23 +170,23 @@ def main(args=None) -> int:
         raise SystemExit("Hold time and target timeout must be valid.")
 
     rclpy.init(args=args)
-    node = ThreeStationTest()
+    node = FullPathTest()
     passed = False
     try:
         print("Waiting for the navigation action server.")
         if not node.action_client.wait_for_server(timeout_sec=10.0):
-            print("THREE-STATION TEST: FAIL (action server unavailable)")
+            print("FULL-PATH TEST: FAIL (action server unavailable)")
             return 1
         print("Checking navigation-to-ESP command routing.")
         if not node.wait_for_navigation_command_path():
             print(
-                "THREE-STATION TEST: REFUSED "
+                "FULL-PATH TEST: REFUSED "
                 "(launch navigation with command_topic:=/cmd_vel)"
             )
             return 2
         print("Waiting for the ESP enable subscription.")
         if not node.wait_for_enable_subscription():
-            print("THREE-STATION TEST: FAIL (ESP enable unavailable)")
+            print("FULL-PATH TEST: FAIL (ESP enable unavailable)")
             return 1
         node.enable_base()
         print("Base enable heartbeat active.")
@@ -196,13 +198,13 @@ def main(args=None) -> int:
                 parsed.target_timeout,
             ):
                 print(
-                    f"THREE-STATION TEST: FAIL at {target}; "
+                    f"FULL-PATH TEST: FAIL at {target}; "
                     "later targets were not requested."
                 )
                 return 1
 
         passed = True
-        print("THREE-STATION TEST: PASS")
+        print("FULL-PATH TEST: PASS")
         return 0
     finally:
         node.disable_base()

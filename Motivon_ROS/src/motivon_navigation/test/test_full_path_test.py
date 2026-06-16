@@ -5,7 +5,7 @@ from pathlib import Path
 SOURCE = (
     Path(__file__).resolve().parents[1]
     / "motivon_navigation"
-    / "two_station_test.py"
+    / "full_path_test.py"
 )
 
 
@@ -13,7 +13,7 @@ def load_tree():
     return ast.parse(SOURCE.read_text(encoding="utf-8"))
 
 
-def test_target_order_is_wp1_then_wp2():
+def test_target_order_is_complete_round_trip():
     tree = load_tree()
     assignment = next(
         node
@@ -27,7 +27,7 @@ def test_target_order_is_wp1_then_wp2():
 
     assert [
         element.value for element in assignment.value.elts
-    ] == ["WP1", "WP2"]
+    ] == ["WP1", "WP2", "WP3", "HOME"]
 
 
 def test_later_target_is_not_requested_after_failure():

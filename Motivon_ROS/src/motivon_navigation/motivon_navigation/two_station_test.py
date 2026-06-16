@@ -150,7 +150,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main(args=None) -> None:
+def main(args=None) -> int:
     parsed = parse_args()
     if not parsed.area_clear:
         raise SystemExit(
@@ -171,18 +171,18 @@ def main(args=None) -> None:
         print("Waiting for the navigation action server.")
         if not node.action_client.wait_for_server(timeout_sec=10.0):
             print("TWO-STATION TEST: FAIL (action server unavailable)")
-            return
+            return 1
         print("Checking navigation-to-ESP command routing.")
         if not node.wait_for_navigation_command_path():
             print(
                 "TWO-STATION TEST: REFUSED "
                 "(launch navigation with command_topic:=/cmd_vel)"
             )
-            return
+            return 2
         print("Waiting for the ESP enable subscription.")
         if not node.wait_for_enable_subscription():
             print("TWO-STATION TEST: FAIL (ESP enable unavailable)")
-            return
+            return 1
         node.enable_base()
         print("Base enable heartbeat active.")
 
@@ -196,10 +196,11 @@ def main(args=None) -> None:
                     f"TWO-STATION TEST: FAIL at {target}; "
                     "later targets were not requested."
                 )
-                return
+                return 1
 
         passed = True
         print("TWO-STATION TEST: PASS")
+        return 0
     finally:
         node.disable_base()
         print("Base disabled.")
@@ -210,4 +211,4 @@ def main(args=None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

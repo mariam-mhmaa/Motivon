@@ -187,10 +187,12 @@ rcl_publisher_t imu_ok_publisher;
 rcl_publisher_t heartbeat_publisher;
 rcl_subscription_t cmd_vel_subscription;
 rcl_subscription_t enable_subscription;
+rcl_subscription_t software_reset_subscription;
 rclc_executor_t executor;
 
 geometry_msgs__msg__Twist cmd_vel_message;
 std_msgs__msg__Bool enable_message;
+std_msgs__msg__Bool software_reset_message;
 sensor_msgs__msg__JointState wheel_states_message;
 sensor_msgs__msg__Imu imu_message;
 std_msgs__msg__Bool imu_ok_message;
@@ -213,9 +215,25 @@ bool imu_ok_publisher_initialized = false;
 bool heartbeat_publisher_initialized = false;
 bool cmd_vel_subscription_initialized = false;
 bool enable_subscription_initialized = false;
+bool software_reset_subscription_initialized = false;
 bool executor_initialized = false;
+volatile bool software_reset_requested = false;
 
 void stopAllMotors();
+
+const char *agentStateName(AgentState state) {
+  switch (state) {
+    case WAITING_FOR_AGENT:
+      return "WAITING_FOR_AGENT";
+    case AGENT_AVAILABLE:
+      return "AGENT_AVAILABLE";
+    case AGENT_CONNECTED:
+      return "AGENT_CONNECTED";
+    case AGENT_DISCONNECTED:
+      return "AGENT_DISCONNECTED";
+  }
+  return "UNKNOWN";
+}
 
 void requestBaseStop() {
   portENTER_CRITICAL(&command_mux);
@@ -236,8 +254,15 @@ AgentState getAgentState() {
 
 void setAgentState(AgentState state) {
   portENTER_CRITICAL(&agent_state_mux);
+  const AgentState previous = agent_state;
   agent_state = state;
   portEXIT_CRITICAL(&agent_state_mux);
+  if (previous != state) {
+    Serial.printf(
+        "[micro_ros] State %s -> %s\n",
+        agentStateName(previous),
+        agentStateName(state));
+  }
 }
 
 bool connectWifi() {
@@ -638,6 +663,13 @@ void enableCallback(const void *message) {
   portEXIT_CRITICAL(&command_mux);
 }
 
+void softwareResetCallback(const void *message) {
+  const auto *reset = static_cast<const std_msgs__msg__Bool *>(message);
+  if (reset->data) {
+    software_reset_requested = true;
+  }
+}
+
 void fillStamp(std_msgs__msg__Header &header) {
   const int64_t epoch_nanos = rmw_uros_epoch_nanos();
   if (epoch_nanos > 0) {
@@ -747,6 +779,7 @@ void resetEntityHandles() {
   heartbeat_publisher = rcl_get_zero_initialized_publisher();
   cmd_vel_subscription = rcl_get_zero_initialized_subscription();
   enable_subscription = rcl_get_zero_initialized_subscription();
+  software_reset_subscription = rcl_get_zero_initialized_subscription();
   executor = rclc_executor_t{};
 }
 
@@ -827,8 +860,17 @@ bool createEntities() {
   }
   enable_subscription_initialized = true;
 
+  if (rclc_subscription_init_default(
+          &software_reset_subscription,
+          &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+          "/base/software_reset") != RCL_RET_OK) {
+    return false;
+  }
+  software_reset_subscription_initialized = true;
+
   if (rclc_executor_init(
-          &executor, &support.context, 2, &allocator) != RCL_RET_OK) {
+          &executor, &support.context, 3, &allocator) != RCL_RET_OK) {
     return false;
   }
   executor_initialized = true;
@@ -847,6 +889,15 @@ bool createEntities() {
           &enable_subscription,
           &enable_message,
           &enableCallback,
+          ON_NEW_DATA) != RCL_RET_OK) {
+    return false;
+  }
+
+  if (rclc_executor_add_subscription(
+          &executor,
+          &software_reset_subscription,
+          &software_reset_message,
+          &softwareResetCallback,
           ON_NEW_DATA) != RCL_RET_OK) {
     return false;
   }
@@ -883,6 +934,12 @@ void destroyEntities() {
         "/base/enable subscription",
         rcl_subscription_fini(&enable_subscription, &node));
     enable_subscription_initialized = false;
+  }
+  if (software_reset_subscription_initialized) {
+    logCleanupResult(
+        "/base/software_reset subscription",
+        rcl_subscription_fini(&software_reset_subscription, &node));
+    software_reset_subscription_initialized = false;
   }
   if (wheel_publisher_initialized) {
     logCleanupResult(
@@ -1021,6 +1078,18 @@ void imuTask(void *) {
   }
 }
 
+void restartIfRequested() {
+  if (!software_reset_requested) {
+    return;
+  }
+  software_reset_requested = false;
+  requestBaseStop();
+  stopAllMotors();
+  Serial.println("[micro_ros] Software reset requested; restarting ESP32.");
+  delay(100);
+  ESP.restart();
+}
+
 void microRosTask(void *) {
   uint32_t last_discovery_ms = 0;
   uint32_t next_wheel_publish_ms = 0;
@@ -1058,18 +1127,31 @@ void microRosTask(void *) {
         if (rmw_uros_ping_agent(
                 AGENT_DISCOVERY_PING_TIMEOUT_MS,
                 AGENT_DISCOVERY_PING_ATTEMPTS) == RMW_RET_OK) {
+          Serial.printf(
+              "[micro_ros] Agent reachable at %s:%u\n",
+              MOTIVON_AGENT_IP,
+              static_cast<unsigned int>(MOTIVON_AGENT_PORT));
           setAgentState(AGENT_AVAILABLE);
+        } else {
+          Serial.printf(
+              "[micro_ros] Agent ping failed at %s:%u\n",
+              MOTIVON_AGENT_IP,
+              static_cast<unsigned int>(MOTIVON_AGENT_PORT));
         }
         break;
 
       case AGENT_AVAILABLE:
+        Serial.println("[micro_ros] Creating ROS entities...");
         if (createEntities()) {
           next_wheel_publish_ms = now_ms;
           next_imu_publish_ms = now_ms + 20;
           next_status_publish_ms = now_ms + STATUS_PERIOD_MS;
           consecutive_publish_failures = 0;
+          Serial.println(
+              "[micro_ros] ROS entities ready; esp32_base_node connected.");
           setAgentState(AGENT_CONNECTED);
         } else {
+          Serial.println("[micro_ros] Entity creation failed; retrying.");
           destroyEntities();
           setAgentState(WAITING_FOR_AGENT);
         }
@@ -1077,6 +1159,7 @@ void microRosTask(void *) {
 
       case AGENT_CONNECTED: {
         rclc_executor_spin_some(&executor, RCL_MS_TO_NS(1));
+        restartIfRequested();
 
         bool publish_attempted = false;
         const char *published_topic = "";

@@ -2,12 +2,15 @@ from pathlib import Path
 import re
 
 
-FIRMWARE = (
-    Path(__file__).resolve().parents[3]
-    / "firmware"
-    / "esp32_base"
-    / "esp32_base.ino"
-)
+def firmware_path() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "firmware" / "esp32_base" / "esp32_base.ino"
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError("Could not locate firmware/esp32_base.ino")
+
+
+FIRMWARE = firmware_path()
 
 
 def constant_value(source: str, name: str) -> int:
@@ -75,6 +78,15 @@ def test_periodic_status_is_non_blocking_and_enable_is_reliable():
         "rclc_subscription_init_best_effort(\n"
         "          &cmd_vel_subscription"
     ) in source
+
+
+def test_esp_software_reset_requires_explicit_ros_request():
+    source = FIRMWARE.read_text(encoding="utf-8")
+
+    assert '"/base/software_reset"' in source
+    assert "softwareResetCallback" in source
+    assert "if (reset->data)" in source
+    assert "ESP.restart();" in source
 
 
 def test_wifi_initialization_matches_verified_station_only_baseline():
