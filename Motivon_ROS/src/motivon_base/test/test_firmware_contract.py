@@ -72,6 +72,28 @@ def test_agent_discovery_failure_restarts_esp_after_sustained_outage():
     assert "restartAfterAgentDiscoveryTimeout" not in connected_case
 
 
+def test_entity_creation_failures_restart_esp():
+    source = FIRMWARE.read_text(encoding="utf-8")
+
+    failure_limit = constant_value(source, "ENTITY_CREATION_FAILURE_LIMIT")
+    micro_ros_task_start = source.index("void microRosTask")
+    available_case = source[
+        source.index("case AGENT_AVAILABLE:", micro_ros_task_start)
+        : source.index("case AGENT_CONNECTED:", micro_ros_task_start)
+    ]
+    restart_helper = source[
+        source.index("void restartAfterEntityCreationFailures")
+        : source.index("void microRosTask")
+    ]
+
+    assert failure_limit == 5
+    assert "consecutive_entity_failures" in available_case
+    assert "restartAfterEntityCreationFailures" in available_case
+    assert "requestBaseStop();" in restart_helper
+    assert "stopAllMotors();" in restart_helper
+    assert "ESP.restart();" in restart_helper
+
+
 def test_connected_micro_ros_loop_does_not_block_on_agent_ping():
     source = FIRMWARE.read_text(encoding="utf-8")
 

@@ -9,6 +9,7 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import Bool
+from std_srvs.srv import Trigger
 
 
 TARGETS = ("WP1", "WP2", "WP3", "HOME")
@@ -24,6 +25,9 @@ class FullPathTest(Node):
         )
         self.enable_publisher = self.create_publisher(
             Bool, "/base/enable", 10
+        )
+        self.set_home_client = self.create_client(
+            Trigger, "/navigation/set_home"
         )
         self.enable_requested = False
         self.create_timer(0.50, self._publish_enable_state)
@@ -42,23 +46,57 @@ class FullPathTest(Node):
                 return True
         return False
 
+    def set_home(self, timeout_s: float = 10.0) -> bool:
+        if not self.set_home_client.wait_for_service(timeout_sec=timeout_s):
+            print("FULL-PATH TEST: FAIL (/navigation/set_home unavailable)")
+            return False
+
+        future = self.set_home_client.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_s)
+        if not future.done() or future.result() is None:
+            print("FULL-PATH TEST: FAIL (/navigation/set_home timed out)")
+            return False
+
+        response = future.result()
+        print(f"Set HOME: success={response.success}, message={response.message}")
+        return bool(response.success)
+
     def wait_for_navigation_command_path(
         self, timeout_s: float = 10.0
     ) -> bool:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             rclpy.spin_once(self, timeout_sec=0.05)
-            publishers = self.get_publishers_info_by_topic("/cmd_vel")
-            subscriptions = self.get_subscriptions_info_by_topic("/cmd_vel")
-            navigation_connected = any(
+            final_publishers = self.get_publishers_info_by_topic("/cmd_vel")
+            final_subscriptions = self.get_subscriptions_info_by_topic("/cmd_vel")
+            raw_publishers = self.get_publishers_info_by_topic(
+                "/navigation/cmd_vel_raw"
+            )
+            raw_subscriptions = self.get_subscriptions_info_by_topic(
+                "/navigation/cmd_vel_raw"
+            )
+
+            direct_navigation_connected = any(
                 endpoint.node_name == "navigation_node"
-                for endpoint in publishers
+                for endpoint in final_publishers
+            )
+            gated_navigation_connected = any(
+                endpoint.node_name == "navigation_node"
+                for endpoint in raw_publishers
+            ) and any(
+                endpoint.node_name == "cmd_vel_gate_node"
+                for endpoint in raw_subscriptions
+            ) and any(
+                endpoint.node_name == "cmd_vel_gate_node"
+                for endpoint in final_publishers
             )
             base_connected = any(
                 endpoint.node_name == "esp32_base_node"
-                for endpoint in subscriptions
+                for endpoint in final_subscriptions
             )
-            if navigation_connected and base_connected:
+            if (
+                direct_navigation_connected or gated_navigation_connected
+            ) and base_connected:
                 return True
         return False
 
@@ -177,11 +215,19 @@ def main(args=None) -> int:
         if not node.action_client.wait_for_server(timeout_sec=10.0):
             print("FULL-PATH TEST: FAIL (action server unavailable)")
             return 1
+        print("Setting HOME from the current robot pose.")
+        if not node.set_home():
+            print(
+                "FULL-PATH TEST: FAIL (HOME could not be set; "
+                "verify fresh /odometry/filtered and physical HOME pose)"
+            )
+            return 1
         print("Checking navigation-to-ESP command routing.")
         if not node.wait_for_navigation_command_path():
             print(
                 "FULL-PATH TEST: REFUSED "
-                "(launch navigation with command_topic:=/cmd_vel)"
+                "(launch direct navigation with command_topic:=/cmd_vel "
+                "or obstacle-gated navigation with cmd_vel_gate_node)"
             )
             return 2
         print("Waiting for the ESP enable subscription.")

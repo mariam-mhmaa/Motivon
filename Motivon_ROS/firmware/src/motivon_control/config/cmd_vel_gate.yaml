@@ -1,0 +1,6 @@
+cmd_vel_gate_node:
+  ros__parameters:
+    mode: AUTO
+    publish_rate_hz: 25.0
+    command_stale_timeout_s: 0.50
+    require_obstacle_fresh_in_auto: true

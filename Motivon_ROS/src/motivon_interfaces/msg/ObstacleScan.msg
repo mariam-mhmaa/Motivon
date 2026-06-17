@@ -1,0 +1,15 @@
+builtin_interfaces/Time stamp
+string active_front
+string active_back
+float64 front_cm
+float64 front_left_cm
+float64 front_right_cm
+float64 back_cm
+float64 left_cm
+float64 right_cm
+bool front_valid
+bool front_left_valid
+bool front_right_valid
+bool back_valid
+bool left_valid
+bool right_valid

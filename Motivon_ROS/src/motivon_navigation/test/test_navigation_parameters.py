@@ -42,6 +42,21 @@ def test_initial_navigation_limits_match_confirmed_configuration():
     assert parameters["odometry_abort_timeout_s"] == 5.00
     assert parameters["localization_recovery_samples"] == 5
     assert parameters["progress_timeout_s"] == 5.0
+    assert parameters["enable_static_avoidance"] is True
+    assert parameters["avoidance_lateral_m"] == 0.65
+    assert parameters["avoidance_forward_m"] == 1.00
+    assert parameters["side_avoidance_longitudinal_search_m"] == 1.20
+    assert parameters["side_avoidance_longitudinal_margin_m"] == 0.38
+    assert parameters["side_avoidance_lateral_search_m"] == 0.90
+    assert parameters["side_avoidance_lateral_margin_m"] == 0.34
+    assert parameters["side_avoidance_edge_seen_cm"] == 45.0
+    assert parameters["side_avoidance_edge_clear_cm"] == 60.0
+    assert parameters["front_avoidance_lateral_search_m"] == 0.90
+    assert parameters["front_avoidance_lateral_margin_m"] == 0.34
+    assert parameters["front_avoidance_longitudinal_search_m"] == 1.20
+    assert parameters["front_avoidance_longitudinal_margin_m"] == 0.38
+    assert parameters["front_avoidance_edge_seen_cm"] == 45.0
+    assert parameters["front_avoidance_edge_clear_cm"] == 60.0
     assert parameters["command_topic"] == "/navigation/cmd_vel_raw"
 
 

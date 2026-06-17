@@ -44,6 +44,7 @@ constexpr uint8_t AGENT_DISCOVERY_PING_ATTEMPTS = 1;
 constexpr uint32_t AGENT_HEALTH_PING_TIMEOUT_MS = 100;
 constexpr uint8_t AGENT_HEALTH_PING_ATTEMPTS = 2;
 constexpr uint8_t AGENT_FAILURE_LIMIT = 6;
+constexpr uint8_t ENTITY_CREATION_FAILURE_LIMIT = 5;
 constexpr uint8_t PUBLISH_FAILURE_LIMIT = 20;
 constexpr uint8_t IMU_FAILURE_LIMIT = 5;
 constexpr float FILTER_ALPHA = 0.25f;
@@ -1102,6 +1103,16 @@ void restartAfterAgentDiscoveryTimeout(uint32_t waited_ms) {
   ESP.restart();
 }
 
+void restartAfterEntityCreationFailures(uint8_t failures) {
+  requestBaseStop();
+  stopAllMotors();
+  Serial.printf(
+      "[micro_ros] ROS entity creation failed %u times; restarting ESP32.\n",
+      static_cast<unsigned int>(failures));
+  delay(100);
+  ESP.restart();
+}
+
 void microRosTask(void *) {
   uint32_t last_discovery_ms = 0;
   uint32_t agent_discovery_started_ms = millis();
@@ -1109,6 +1120,7 @@ void microRosTask(void *) {
   uint32_t next_imu_publish_ms = 0;
   uint32_t next_status_publish_ms = 0;
   uint8_t consecutive_discovery_failures = 0;
+  uint8_t consecutive_entity_failures = 0;
   uint8_t consecutive_publish_failures = 0;
 
   while (true) {
@@ -1122,6 +1134,7 @@ void microRosTask(void *) {
       }
       setAgentState(WAITING_FOR_AGENT);
       consecutive_publish_failures = 0;
+      consecutive_entity_failures = 0;
 
       while (!connectWifi()) {
         requestBaseStop();
@@ -1177,13 +1190,26 @@ void microRosTask(void *) {
           next_wheel_publish_ms = now_ms;
           next_imu_publish_ms = now_ms + 20;
           next_status_publish_ms = now_ms + STATUS_PERIOD_MS;
+          consecutive_entity_failures = 0;
           consecutive_publish_failures = 0;
           Serial.println(
               "[micro_ros] ROS entities ready; esp32_base_node connected.");
           setAgentState(AGENT_CONNECTED);
         } else {
-          Serial.println("[micro_ros] Entity creation failed; retrying.");
+          if (consecutive_entity_failures < 255) {
+            ++consecutive_entity_failures;
+          }
+          Serial.printf(
+              "[micro_ros] Entity creation failed; retrying (%u/%u).\n",
+              static_cast<unsigned int>(consecutive_entity_failures),
+              static_cast<unsigned int>(ENTITY_CREATION_FAILURE_LIMIT));
           destroyEntities();
+          if (
+              consecutive_entity_failures >=
+              ENTITY_CREATION_FAILURE_LIMIT) {
+            restartAfterEntityCreationFailures(
+                consecutive_entity_failures);
+          }
           agent_discovery_started_ms = millis();
           consecutive_discovery_failures = 0;
           setAgentState(WAITING_FOR_AGENT);
@@ -1246,6 +1272,7 @@ void microRosTask(void *) {
       case AGENT_DISCONNECTED:
         destroyEntities();
         consecutive_publish_failures = 0;
+        consecutive_entity_failures = 0;
         agent_discovery_started_ms = millis();
         consecutive_discovery_failures = 0;
         setAgentState(WAITING_FOR_AGENT);

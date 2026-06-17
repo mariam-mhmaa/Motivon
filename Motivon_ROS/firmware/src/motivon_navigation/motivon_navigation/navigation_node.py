@@ -10,7 +10,7 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist
 from motivon_interfaces.action import NavigateToTarget
-from motivon_interfaces.msg import NavigationStatus
+from motivon_interfaces.msg import NavigationStatus, ObstacleState
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -74,6 +74,13 @@ class NavigationNode(Node):
             qos_profile_sensor_data,
             callback_group=self.callback_group,
         )
+        self.create_subscription(
+            ObstacleState,
+            "/obstacle/state",
+            self._obstacle_callback,
+            10,
+            callback_group=self.callback_group,
+        )
         self.create_service(
             Trigger,
             "/navigation/set_home",
@@ -126,6 +133,14 @@ class NavigationNode(Node):
         self.last_yaw_error = 0.0
         self.last_command = Twist()
         self.frame_warning_printed = False
+        self.latest_obstacle: Optional[ObstacleState] = None
+        self.stage_before_obstacle_wait = ""
+        self.avoidance_waypoints = []
+        self.avoidance_index = 0
+        self.avoidance_segment_start: Optional[Waypoint] = None
+        self.avoidance_best_distance = math.inf
+        self.avoidance_mode = ""
+        self.side_avoidance = {}
 
         self.get_logger().info(
             "Navigation ready but disarmed: "
@@ -169,6 +184,21 @@ class NavigationNode(Node):
             "maximum_yaw_jump_rad": 0.70,
             "progress_timeout_s": 5.0,
             "progress_epsilon_m": 0.015,
+            "enable_static_avoidance": True,
+            "avoidance_lateral_m": 0.65,
+            "avoidance_forward_m": 1.00,
+            "side_avoidance_longitudinal_search_m": 1.20,
+            "side_avoidance_longitudinal_margin_m": 0.38,
+            "side_avoidance_lateral_search_m": 0.90,
+            "side_avoidance_lateral_margin_m": 0.34,
+            "side_avoidance_edge_seen_cm": 45.0,
+            "side_avoidance_edge_clear_cm": 60.0,
+            "front_avoidance_lateral_search_m": 0.90,
+            "front_avoidance_lateral_margin_m": 0.34,
+            "front_avoidance_longitudinal_search_m": 1.20,
+            "front_avoidance_longitudinal_margin_m": 0.38,
+            "front_avoidance_edge_seen_cm": 45.0,
+            "front_avoidance_edge_clear_cm": 60.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -259,6 +289,59 @@ class NavigationNode(Node):
         self.progress_epsilon = float(
             self.get_parameter("progress_epsilon_m").value
         )
+        self.enable_static_avoidance = bool(
+            self.get_parameter("enable_static_avoidance").value
+        )
+        self.avoidance_lateral_m = float(
+            self.get_parameter("avoidance_lateral_m").value
+        )
+        self.avoidance_forward_m = float(
+            self.get_parameter("avoidance_forward_m").value
+        )
+        self.side_avoidance_longitudinal_search_m = float(
+            self.get_parameter(
+                "side_avoidance_longitudinal_search_m"
+            ).value
+        )
+        self.side_avoidance_longitudinal_margin_m = float(
+            self.get_parameter(
+                "side_avoidance_longitudinal_margin_m"
+            ).value
+        )
+        self.side_avoidance_lateral_search_m = float(
+            self.get_parameter("side_avoidance_lateral_search_m").value
+        )
+        self.side_avoidance_lateral_margin_m = float(
+            self.get_parameter("side_avoidance_lateral_margin_m").value
+        )
+        self.side_avoidance_edge_seen_cm = float(
+            self.get_parameter("side_avoidance_edge_seen_cm").value
+        )
+        self.side_avoidance_edge_clear_cm = float(
+            self.get_parameter("side_avoidance_edge_clear_cm").value
+        )
+        self.front_avoidance_lateral_search_m = float(
+            self.get_parameter("front_avoidance_lateral_search_m").value
+        )
+        self.front_avoidance_lateral_margin_m = float(
+            self.get_parameter("front_avoidance_lateral_margin_m").value
+        )
+        self.front_avoidance_longitudinal_search_m = float(
+            self.get_parameter(
+                "front_avoidance_longitudinal_search_m"
+            ).value
+        )
+        self.front_avoidance_longitudinal_margin_m = float(
+            self.get_parameter(
+                "front_avoidance_longitudinal_margin_m"
+            ).value
+        )
+        self.front_avoidance_edge_seen_cm = float(
+            self.get_parameter("front_avoidance_edge_seen_cm").value
+        )
+        self.front_avoidance_edge_clear_cm = float(
+            self.get_parameter("front_avoidance_edge_clear_cm").value
+        )
         positive_values = (
             self.control_period,
             self.settings.maximum_speed,
@@ -276,6 +359,20 @@ class NavigationNode(Node):
             self.maximum_pose_jump,
             self.maximum_yaw_jump,
             self.progress_epsilon,
+            self.avoidance_lateral_m,
+            self.avoidance_forward_m,
+            self.side_avoidance_longitudinal_search_m,
+            self.side_avoidance_longitudinal_margin_m,
+            self.side_avoidance_lateral_search_m,
+            self.side_avoidance_lateral_margin_m,
+            self.side_avoidance_edge_seen_cm,
+            self.side_avoidance_edge_clear_cm,
+            self.front_avoidance_lateral_search_m,
+            self.front_avoidance_lateral_margin_m,
+            self.front_avoidance_longitudinal_search_m,
+            self.front_avoidance_longitudinal_margin_m,
+            self.front_avoidance_edge_seen_cm,
+            self.front_avoidance_edge_clear_cm,
         )
         if (
             any(value <= 0 for value in positive_values)
@@ -347,6 +444,10 @@ class NavigationNode(Node):
                     )
             self.latest_odom = pose
             self.odom_receive_ns = now_ns
+
+    def _obstacle_callback(self, message: ObstacleState) -> None:
+        with self.state_lock:
+            self.latest_obstacle = message
 
     def _odom_is_fresh(self, now_ns: int) -> bool:
         return (
@@ -548,6 +649,12 @@ class NavigationNode(Node):
         self.position_settle_count = 0
         self.yaw_settle_count = 0
         self.best_distance = math.inf
+        self.avoidance_best_distance = math.inf
+        self.avoidance_waypoints = []
+        self.avoidance_index = 0
+        self.avoidance_segment_start = None
+        self.avoidance_mode = ""
+        self.side_avoidance = {}
         self.last_progress_ns = self.get_clock().now().nanoseconds
         self.stage = (
             "ALIGNING_FOR_TRAVEL"
@@ -605,7 +712,21 @@ class NavigationNode(Node):
                     pose, self.active_travel_yaw, "NAVIGATING"
                 )
             elif self.stage == "NAVIGATING":
+                if self._handle_navigation_obstacle(pose, now_ns):
+                    self._publish_status(now_ns)
+                    return
                 self._run_translation(pose, now_ns)
+            elif self.stage == "WAITING_FOR_OBSTACLE":
+                if self._handle_navigation_obstacle(pose, now_ns):
+                    self._publish_status(now_ns)
+                    return
+                self.stage = self.stage_before_obstacle_wait or "NAVIGATING"
+                self.detail = "Obstacle cleared; resuming navigation."
+                self.last_progress_ns = now_ns
+                self.best_distance = math.inf
+                self._run_translation(pose, now_ns)
+            elif self.stage == "DETOURING":
+                self._run_avoidance_translation(pose, now_ns)
             elif self.stage == "ALIGNING_FINAL":
                 self._run_yaw_alignment(
                     pose, self.active_path.final_yaw, "HOLDING"
@@ -613,6 +734,590 @@ class NavigationNode(Node):
             elif self.stage == "HOLDING":
                 self._run_hold(now_ns)
             self._publish_status(now_ns)
+
+    def _handle_navigation_obstacle(
+        self, pose: Pose2D, now_ns: int
+    ) -> bool:
+        obstacle = self.latest_obstacle
+        if obstacle is None or not obstacle.blocked:
+            return False
+
+        if (
+            obstacle.static_obstacle
+            and self.enable_static_avoidance
+            and obstacle.blocked_direction in (
+                "front", "back", "left", "right"
+            )
+        ):
+            self._start_static_avoidance(pose, obstacle, now_ns)
+            return True
+
+        self._stop_immediately()
+        if self.stage != "WAITING_FOR_OBSTACLE":
+            self.stage_before_obstacle_wait = self.stage
+            self.stage = "WAITING_FOR_OBSTACLE"
+            self.get_logger().warning(
+                "Navigation paused for obstacle: "
+                f"{obstacle.state}, direction={obstacle.blocked_direction}, "
+                f"detail={obstacle.detail}"
+            )
+        self.detail = (
+            f"Waiting for obstacle to clear: {obstacle.blocked_direction} "
+            f"({obstacle.state})."
+        )
+        self.last_progress_ns = now_ns
+        return True
+
+    def _start_static_avoidance(
+        self, pose: Pose2D, obstacle: ObstacleState, now_ns: int
+    ) -> None:
+        if obstacle.blocked_direction in ("left", "right"):
+            self._start_side_static_avoidance(pose, obstacle, now_ns)
+            return
+        self._start_front_back_static_avoidance(pose, obstacle, now_ns)
+
+    def _start_front_back_static_avoidance(
+        self, pose: Pose2D, obstacle: ObstacleState, now_ns: int
+    ) -> None:
+        detour_side = obstacle.recommended_detour_side
+        if detour_side not in ("left", "right"):
+            detour_side = "left"
+        blocked_direction = obstacle.blocked_direction
+        side_sign = 1.0 if detour_side == "left" else -1.0
+        longitudinal_sign = -1.0 if blocked_direction == "back" else 1.0
+        self.avoidance_mode = "front_back_static"
+        self.side_avoidance = {
+            "blocked_direction": blocked_direction,
+            "detour_side": detour_side,
+            "side_sign": side_sign,
+            "longitudinal_sign": longitudinal_sign,
+            "start_x": pose.x,
+            "start_y": pose.y,
+            "edge_seen": False,
+            "lateral_offset_m": 0.0,
+        }
+        self.avoidance_best_distance = math.inf
+        self.position_settle_count = 0
+        self.last_progress_ns = now_ns
+        self._begin_side_avoidance_leg(
+            pose,
+            "FRONT_LATERAL_FIND_EDGE",
+            "lateral",
+            side_sign,
+            self.front_avoidance_lateral_search_m,
+            now_ns,
+        )
+        self.stage = "DETOURING"
+        self.detail = (
+            "Front/back static obstacle avoidance started: "
+            f"blocked={blocked_direction}, side={detour_side}."
+        )
+        self.get_logger().warning(self.detail)
+
+    def _start_side_static_avoidance(
+        self, pose: Pose2D, obstacle: ObstacleState, now_ns: int
+    ) -> None:
+        detour_direction = obstacle.recommended_detour_side
+        if detour_direction not in ("front", "back"):
+            detour_direction = "front"
+        blocked_side = obstacle.blocked_direction
+        side_sign = 1.0 if blocked_side == "left" else -1.0
+        longitudinal_sign = 1.0 if detour_direction == "front" else -1.0
+        self.avoidance_mode = "side_static"
+        self.side_avoidance = {
+            "blocked_side": blocked_side,
+            "detour_direction": detour_direction,
+            "side_sign": side_sign,
+            "longitudinal_sign": longitudinal_sign,
+            "start_x": pose.x,
+            "start_y": pose.y,
+            "edge_seen": False,
+            "longitudinal_offset_m": 0.0,
+        }
+        self.avoidance_best_distance = math.inf
+        self.position_settle_count = 0
+        self.last_progress_ns = now_ns
+        self._begin_side_avoidance_leg(
+            pose,
+            "SIDE_LONGITUDINAL_FIND_EDGE",
+            "longitudinal",
+            longitudinal_sign,
+            self.side_avoidance_longitudinal_search_m,
+            now_ns,
+        )
+        self.stage = "DETOURING"
+        self.detail = (
+            "Side static obstacle avoidance started: "
+            f"blocked={blocked_side}, detour={detour_direction}."
+        )
+        self.get_logger().warning(self.detail)
+
+    def _begin_side_avoidance_leg(
+        self,
+        pose: Pose2D,
+        leg_name: str,
+        axis: str,
+        direction_sign: float,
+        distance_m: float,
+        now_ns: int,
+    ) -> None:
+        forward_x = math.cos(self.active_travel_yaw)
+        forward_y = math.sin(self.active_travel_yaw)
+        left_x = -math.sin(self.active_travel_yaw)
+        left_y = math.cos(self.active_travel_yaw)
+        if axis == "longitudinal":
+            delta_x = forward_x * direction_sign * distance_m
+            delta_y = forward_y * direction_sign * distance_m
+        else:
+            delta_x = left_x * direction_sign * distance_m
+            delta_y = left_y * direction_sign * distance_m
+
+        self.side_avoidance["leg"] = leg_name
+        self.side_avoidance["axis"] = axis
+        self.side_avoidance["leg_start_x"] = pose.x
+        self.side_avoidance["leg_start_y"] = pose.y
+        self.side_avoidance["target_x"] = pose.x + delta_x
+        self.side_avoidance["target_y"] = pose.y + delta_y
+        self.avoidance_segment_start = Waypoint(
+            f"{leg_name.lower()}_start", pose.x, pose.y, "connector"
+        )
+        self.avoidance_waypoints = [
+            Waypoint(
+                leg_name.lower(),
+                self.side_avoidance["target_x"],
+                self.side_avoidance["target_y"],
+                "connector",
+            )
+        ]
+        self.avoidance_index = 0
+        self.avoidance_best_distance = math.inf
+        self.position_settle_count = 0
+        self.last_progress_ns = now_ns
+
+    def _run_avoidance_translation(
+        self, pose: Pose2D, now_ns: int
+    ) -> None:
+        if self.avoidance_mode == "side_static":
+            self._run_side_static_avoidance(pose, now_ns)
+            return
+        if self.avoidance_mode == "front_back_static":
+            self._run_front_back_static_avoidance(pose, now_ns)
+            return
+
+        if (
+            not self.avoidance_waypoints
+            or self.avoidance_segment_start is None
+            or self.avoidance_index >= len(self.avoidance_waypoints)
+        ):
+            self._finish_static_avoidance(now_ns)
+            return
+
+        target = self.avoidance_waypoints[self.avoidance_index]
+        tracking = tracking_command(
+            pose,
+            self.avoidance_segment_start,
+            target,
+            self.active_travel_yaw,
+            self.settings,
+        )
+        self.last_tracking_distance = tracking.distance
+        self.last_cross_track_error = tracking.cross_track_error
+        self.last_yaw_error = tracking.yaw_error
+
+        if tracking.distance <= self.connector_tolerance:
+            self.position_settle_count += 1
+            self._stop_immediately()
+            if self.position_settle_count >= self.arrival_settle_samples:
+                reached = target
+                self.avoidance_index += 1
+                self.avoidance_segment_start = reached
+                self.avoidance_best_distance = math.inf
+                self.position_settle_count = 0
+                self.last_progress_ns = now_ns
+                if self.avoidance_index >= len(self.avoidance_waypoints):
+                    self._finish_static_avoidance(now_ns)
+                else:
+                    self.detail = (
+                        "Static obstacle detour continuing to "
+                        f"{self.avoidance_waypoints[self.avoidance_index].name}."
+                    )
+            return
+
+        self.position_settle_count = 0
+        if tracking.distance <= (
+            self.avoidance_best_distance - self.progress_epsilon
+        ):
+            self.avoidance_best_distance = tracking.distance
+            self.last_progress_ns = now_ns
+        elif now_ns - self.last_progress_ns >= self.progress_timeout_ns:
+            self._fail(
+                NavigateToTarget.Result.STATUS_STALLED,
+                f"No progress during static obstacle detour to {target.name}.",
+            )
+            return
+
+        command = Twist()
+        command.linear.x = tracking.body_vx
+        command.linear.y = tracking.body_vy
+        command.angular.z = tracking.angular_z
+        self._publish_limited(command)
+
+    def _run_front_back_static_avoidance(
+        self, pose: Pose2D, now_ns: int
+    ) -> None:
+        if (
+            not self.avoidance_waypoints
+            or self.avoidance_segment_start is None
+            or not self.side_avoidance
+        ):
+            self._finish_static_avoidance(now_ns)
+            return
+
+        leg = str(self.side_avoidance.get("leg", ""))
+        target = self.avoidance_waypoints[0]
+        tracking = tracking_command(
+            pose,
+            self.avoidance_segment_start,
+            target,
+            self.active_travel_yaw,
+            self.settings,
+        )
+        self.last_tracking_distance = tracking.distance
+        self.last_cross_track_error = tracking.cross_track_error
+        self.last_yaw_error = tracking.yaw_error
+
+        sensor_finished = self._front_back_avoidance_sensor_finished(leg)
+        target_finished = tracking.distance <= self.connector_tolerance
+        if sensor_finished or target_finished:
+            self.position_settle_count += 1
+            self._stop_immediately()
+            if self.position_settle_count >= self.arrival_settle_samples:
+                self._advance_front_back_avoidance_leg(pose, now_ns)
+            return
+
+        self.position_settle_count = 0
+        if tracking.distance <= (
+            self.avoidance_best_distance - self.progress_epsilon
+        ):
+            self.avoidance_best_distance = tracking.distance
+            self.last_progress_ns = now_ns
+        elif now_ns - self.last_progress_ns >= self.progress_timeout_ns:
+            self._fail(
+                NavigateToTarget.Result.STATUS_STALLED,
+                f"No progress during front/back obstacle detour {leg}.",
+            )
+            return
+
+        command = Twist()
+        command.linear.x = tracking.body_vx
+        command.linear.y = tracking.body_vy
+        command.angular.z = tracking.angular_z
+        self._publish_limited(command)
+
+    def _front_back_avoidance_sensor_finished(self, leg: str) -> bool:
+        if leg == "FRONT_LATERAL_FIND_EDGE":
+            blocked_direction = str(
+                self.side_avoidance.get("blocked_direction", "")
+            )
+            return self._obstacle_distance_is_clear(
+                blocked_direction, self.front_avoidance_edge_clear_cm
+            )
+
+        if leg == "FRONT_LONGITUDINAL_FIND_EDGE":
+            detour_side = str(self.side_avoidance.get("detour_side", ""))
+            if self._obstacle_distance_is_blocked(
+                detour_side, self.front_avoidance_edge_seen_cm
+            ):
+                self.side_avoidance["edge_seen"] = True
+                return False
+            return bool(
+                self.side_avoidance.get("edge_seen", False)
+            ) and self._obstacle_distance_is_clear(
+                detour_side, self.front_avoidance_edge_clear_cm
+            )
+
+        return False
+
+    def _advance_front_back_avoidance_leg(
+        self, pose: Pose2D, now_ns: int
+    ) -> None:
+        leg = str(self.side_avoidance.get("leg", ""))
+        longitudinal_sign = float(
+            self.side_avoidance.get("longitudinal_sign", 1.0)
+        )
+        side_sign = float(self.side_avoidance.get("side_sign", 1.0))
+
+        if leg == "FRONT_LATERAL_FIND_EDGE":
+            self._begin_side_avoidance_leg(
+                pose,
+                "FRONT_LATERAL_MARGIN",
+                "lateral",
+                side_sign,
+                self.front_avoidance_lateral_margin_m,
+                now_ns,
+            )
+            self.detail = "Front/back detour: adding lateral margin."
+            return
+
+        if leg == "FRONT_LATERAL_MARGIN":
+            start_x = float(self.side_avoidance.get("start_x", pose.x))
+            start_y = float(self.side_avoidance.get("start_y", pose.y))
+            left_x = -math.sin(self.active_travel_yaw)
+            left_y = math.cos(self.active_travel_yaw)
+            offset = (
+                (pose.x - start_x) * left_x
+                + (pose.y - start_y) * left_y
+            )
+            self.side_avoidance["lateral_offset_m"] = offset
+            self.side_avoidance["edge_seen"] = False
+            self._begin_side_avoidance_leg(
+                pose,
+                "FRONT_LONGITUDINAL_FIND_EDGE",
+                "longitudinal",
+                longitudinal_sign,
+                self.front_avoidance_longitudinal_search_m,
+                now_ns,
+            )
+            self.detail = (
+                "Front/back detour: moving along obstacle to far edge."
+            )
+            return
+
+        if leg == "FRONT_LONGITUDINAL_FIND_EDGE":
+            self._begin_side_avoidance_leg(
+                pose,
+                "FRONT_LONGITUDINAL_MARGIN",
+                "longitudinal",
+                longitudinal_sign,
+                self.front_avoidance_longitudinal_margin_m,
+                now_ns,
+            )
+            self.detail = "Front/back detour: adding longitudinal margin."
+            return
+
+        if leg == "FRONT_LONGITUDINAL_MARGIN":
+            offset = float(
+                self.side_avoidance.get("lateral_offset_m", 0.0)
+            )
+            if abs(offset) <= self.connector_tolerance:
+                self._finish_static_avoidance(now_ns)
+                return
+            return_sign = -1.0 if offset > 0.0 else 1.0
+            self._begin_side_avoidance_leg(
+                pose,
+                "FRONT_RETURN_PATH",
+                "lateral",
+                return_sign,
+                abs(offset),
+                now_ns,
+            )
+            self.detail = "Front/back detour: returning to original path line."
+            return
+
+        if leg == "FRONT_RETURN_PATH":
+            self._finish_static_avoidance(now_ns)
+            return
+
+        self._finish_static_avoidance(now_ns)
+
+    def _run_side_static_avoidance(
+        self, pose: Pose2D, now_ns: int
+    ) -> None:
+        if (
+            not self.avoidance_waypoints
+            or self.avoidance_segment_start is None
+            or not self.side_avoidance
+        ):
+            self._finish_static_avoidance(now_ns)
+            return
+
+        leg = str(self.side_avoidance.get("leg", ""))
+        target = self.avoidance_waypoints[0]
+        tracking = tracking_command(
+            pose,
+            self.avoidance_segment_start,
+            target,
+            self.active_travel_yaw,
+            self.settings,
+        )
+        self.last_tracking_distance = tracking.distance
+        self.last_cross_track_error = tracking.cross_track_error
+        self.last_yaw_error = tracking.yaw_error
+
+        sensor_finished = self._side_avoidance_sensor_finished(leg)
+        target_finished = tracking.distance <= self.connector_tolerance
+        if sensor_finished or target_finished:
+            self.position_settle_count += 1
+            self._stop_immediately()
+            if self.position_settle_count >= self.arrival_settle_samples:
+                self._advance_side_avoidance_leg(pose, now_ns)
+            return
+
+        self.position_settle_count = 0
+        if tracking.distance <= (
+            self.avoidance_best_distance - self.progress_epsilon
+        ):
+            self.avoidance_best_distance = tracking.distance
+            self.last_progress_ns = now_ns
+        elif now_ns - self.last_progress_ns >= self.progress_timeout_ns:
+            self._fail(
+                NavigateToTarget.Result.STATUS_STALLED,
+                f"No progress during side obstacle detour {leg}.",
+            )
+            return
+
+        command = Twist()
+        command.linear.x = tracking.body_vx
+        command.linear.y = tracking.body_vy
+        command.angular.z = tracking.angular_z
+        self._publish_limited(command)
+
+    def _side_avoidance_sensor_finished(self, leg: str) -> bool:
+        if leg == "SIDE_LONGITUDINAL_FIND_EDGE":
+            blocked_side = str(self.side_avoidance.get("blocked_side", ""))
+            return self._obstacle_distance_is_clear(
+                blocked_side, self.side_avoidance_edge_clear_cm
+            )
+
+        if leg == "SIDE_STRAFE_FIND_EDGE":
+            detour_direction = str(
+                self.side_avoidance.get("detour_direction", "")
+            )
+            if self._obstacle_distance_is_blocked(
+                detour_direction, self.side_avoidance_edge_seen_cm
+            ):
+                self.side_avoidance["edge_seen"] = True
+                return False
+            return bool(
+                self.side_avoidance.get("edge_seen", False)
+            ) and self._obstacle_distance_is_clear(
+                detour_direction, self.side_avoidance_edge_clear_cm
+            )
+
+        return False
+
+    def _advance_side_avoidance_leg(
+        self, pose: Pose2D, now_ns: int
+    ) -> None:
+        leg = str(self.side_avoidance.get("leg", ""))
+        longitudinal_sign = float(
+            self.side_avoidance.get("longitudinal_sign", 1.0)
+        )
+        side_sign = float(self.side_avoidance.get("side_sign", 1.0))
+
+        if leg == "SIDE_LONGITUDINAL_FIND_EDGE":
+            self._begin_side_avoidance_leg(
+                pose,
+                "SIDE_LONGITUDINAL_MARGIN",
+                "longitudinal",
+                longitudinal_sign,
+                self.side_avoidance_longitudinal_margin_m,
+                now_ns,
+            )
+            self.detail = "Side detour: adding longitudinal margin."
+            return
+
+        if leg == "SIDE_LONGITUDINAL_MARGIN":
+            start_x = float(self.side_avoidance.get("start_x", pose.x))
+            start_y = float(self.side_avoidance.get("start_y", pose.y))
+            forward_x = math.cos(self.active_travel_yaw)
+            forward_y = math.sin(self.active_travel_yaw)
+            offset = (
+                (pose.x - start_x) * forward_x
+                + (pose.y - start_y) * forward_y
+            )
+            self.side_avoidance["longitudinal_offset_m"] = offset
+            self.side_avoidance["edge_seen"] = False
+            self._begin_side_avoidance_leg(
+                pose,
+                "SIDE_STRAFE_FIND_EDGE",
+                "lateral",
+                side_sign,
+                self.side_avoidance_lateral_search_m,
+                now_ns,
+            )
+            self.detail = "Side detour: continuing strafe past far edge."
+            return
+
+        if leg == "SIDE_STRAFE_FIND_EDGE":
+            self._begin_side_avoidance_leg(
+                pose,
+                "SIDE_STRAFE_MARGIN",
+                "lateral",
+                side_sign,
+                self.side_avoidance_lateral_margin_m,
+                now_ns,
+            )
+            self.detail = "Side detour: adding lateral body margin."
+            return
+
+        if leg == "SIDE_STRAFE_MARGIN":
+            offset = float(
+                self.side_avoidance.get("longitudinal_offset_m", 0.0)
+            )
+            if abs(offset) <= self.connector_tolerance:
+                self._finish_static_avoidance(now_ns)
+                return
+            return_sign = -1.0 if offset > 0.0 else 1.0
+            self._begin_side_avoidance_leg(
+                pose,
+                "SIDE_RETURN_PATH",
+                "longitudinal",
+                return_sign,
+                abs(offset),
+                now_ns,
+            )
+            self.detail = "Side detour: returning to original path line."
+            return
+
+        if leg == "SIDE_RETURN_PATH":
+            self._finish_static_avoidance(now_ns)
+            return
+
+        self._finish_static_avoidance(now_ns)
+
+    def _obstacle_distance_is_blocked(
+        self, direction: str, threshold_cm: float
+    ) -> bool:
+        value = self._obstacle_distance(direction)
+        return value is not None and value <= threshold_cm
+
+    def _obstacle_distance_is_clear(
+        self, direction: str, threshold_cm: float
+    ) -> bool:
+        value = self._obstacle_distance(direction)
+        return value is not None and value >= threshold_cm
+
+    def _obstacle_distance(self, direction: str) -> Optional[float]:
+        obstacle = self.latest_obstacle
+        if obstacle is None:
+            return None
+        value = None
+        if direction == "front":
+            value = obstacle.front_cm
+        elif direction == "back":
+            value = obstacle.back_cm
+        elif direction == "left":
+            value = obstacle.left_cm
+        elif direction == "right":
+            value = obstacle.right_cm
+        if value is None or not math.isfinite(value) or value <= 0.0:
+            return None
+        return float(value)
+
+    def _finish_static_avoidance(self, now_ns: int) -> None:
+        self.avoidance_waypoints = []
+        self.avoidance_index = 0
+        self.avoidance_segment_start = None
+        self.avoidance_best_distance = math.inf
+        self.avoidance_mode = ""
+        self.side_avoidance = {}
+        self.best_distance = math.inf
+        self.position_settle_count = 0
+        self.last_progress_ns = now_ns
+        self.stage = "NAVIGATING"
+        self.detail = "Static obstacle detour complete; resuming route."
+        self.get_logger().warning(self.detail)
 
     def _handle_odometry_health(self, now_ns: int) -> bool:
         odometry_fresh = self._odom_is_fresh(now_ns)

@@ -96,3 +96,39 @@ def test_shutdown_checks_the_ros_context_before_publishing_stop():
         and node.func.attr == "ok"
         for node in ast.walk(destroy_node)
     )
+
+
+def test_navigation_owns_static_obstacle_detour_state():
+    source = SOURCE.read_text(encoding="utf-8")
+
+    assert '"/obstacle/state"' in source
+    assert "_obstacle_callback" in source
+    assert "_start_static_avoidance" in source
+    assert "_run_avoidance_translation" in source
+    assert 'self.stage = "DETOURING"' in source
+    assert "avoidance_lateral_m" in source
+    assert "avoidance_forward_m" in source
+
+
+def test_navigation_owns_side_static_obstacle_edge_detour():
+    source = SOURCE.read_text(encoding="utf-8")
+
+    assert "_start_side_static_avoidance" in source
+    assert "_run_side_static_avoidance" in source
+    assert "SIDE_LONGITUDINAL_FIND_EDGE" in source
+    assert "SIDE_STRAFE_FIND_EDGE" in source
+    assert "SIDE_RETURN_PATH" in source
+    assert "side_avoidance_edge_seen_cm" in source
+    assert "side_avoidance_edge_clear_cm" in source
+
+
+def test_navigation_owns_front_back_static_obstacle_edge_detour():
+    source = SOURCE.read_text(encoding="utf-8")
+
+    assert "_start_front_back_static_avoidance" in source
+    assert "_run_front_back_static_avoidance" in source
+    assert "FRONT_LATERAL_FIND_EDGE" in source
+    assert "FRONT_LONGITUDINAL_FIND_EDGE" in source
+    assert "FRONT_RETURN_PATH" in source
+    assert "front_avoidance_lateral_margin_m" in source
+    assert "front_avoidance_edge_clear_cm" in source

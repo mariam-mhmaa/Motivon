@@ -1,0 +1,13 @@
+builtin_interfaces/Time stamp
+string state
+bool data_valid
+bool blocked
+bool static_obstacle
+string blocked_direction
+string recommended_detour_side
+float64 front_cm
+float64 back_cm
+float64 left_cm
+float64 right_cm
+float64 blocked_duration_s
+string detail

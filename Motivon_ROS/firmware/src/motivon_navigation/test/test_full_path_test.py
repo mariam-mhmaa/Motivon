@@ -62,8 +62,14 @@ def test_runner_maintains_enable_during_active_test():
     source = SOURCE.read_text(encoding="utf-8")
 
     assert 'self.create_timer(0.50, self._publish_enable_state)' in source
+    assert "self.create_client(" in source
+    assert 'Trigger, "/navigation/set_home"' in source
+    assert "node.set_home()" in source
     assert "node.wait_for_navigation_command_path()" in source
-    assert "command_topic:=/cmd_vel" in source
+    assert "direct_navigation_connected" in source
+    assert "gated_navigation_connected" in source
+    assert "/navigation/cmd_vel_raw" in source
+    assert "cmd_vel_gate_node" in source
     assert "node.wait_for_enable_subscription()" in source
     assert "node.enable_base()" in source
 

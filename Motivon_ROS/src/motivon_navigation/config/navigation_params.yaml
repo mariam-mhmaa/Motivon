@@ -34,3 +34,18 @@ navigation_node:
     maximum_yaw_jump_rad: 0.70
     progress_timeout_s: 5.0
     progress_epsilon_m: 0.015
+    enable_static_avoidance: true
+    avoidance_lateral_m: 0.65
+    avoidance_forward_m: 1.00
+    side_avoidance_longitudinal_search_m: 1.20
+    side_avoidance_longitudinal_margin_m: 0.38
+    side_avoidance_lateral_search_m: 0.90
+    side_avoidance_lateral_margin_m: 0.34
+    side_avoidance_edge_seen_cm: 45.0
+    side_avoidance_edge_clear_cm: 60.0
+    front_avoidance_lateral_search_m: 0.90
+    front_avoidance_lateral_margin_m: 0.34
+    front_avoidance_longitudinal_search_m: 1.20
+    front_avoidance_longitudinal_margin_m: 0.38
+    front_avoidance_edge_seen_cm: 45.0
+    front_avoidance_edge_clear_cm: 60.0
