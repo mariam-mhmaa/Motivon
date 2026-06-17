@@ -12,7 +12,9 @@ def generate_launch_description():
     udp_port = LaunchConfiguration("udp_port")
     start_agent = LaunchConfiguration("start_agent")
     start_gpio_nodes = LaunchConfiguration("start_gpio_nodes")
+    start_led_node = LaunchConfiguration("start_led_node")
     show_vision_preview = LaunchConfiguration("show_vision_preview")
+    publish_vision_debug_image = LaunchConfiguration("publish_vision_debug_image")
 
     base_launch = PathJoinSubstitution(
         [FindPackageShare("motivon_bringup"), "launch", "base_system.launch.py"]
@@ -57,9 +59,19 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument(
+                "start_led_node",
+                default_value="true",
+                description="Start the Raspberry Pi SPI LED strip node.",
+            ),
+            DeclareLaunchArgument(
                 "show_vision_preview",
                 default_value="false",
                 description="Open an OpenCV preview window from the vision node.",
+            ),
+            DeclareLaunchArgument(
+                "publish_vision_debug_image",
+                default_value="false",
+                description="Publish old-style vision overlay frames for GUI preview.",
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(base_launch),
@@ -129,6 +141,7 @@ def generate_launch_description():
                 parameters=[led_params],
                 respawn=True,
                 respawn_delay=2.0,
+                condition=IfCondition(start_led_node),
             ),
             Node(
                 package="motivon_vision",
@@ -141,7 +154,11 @@ def generate_launch_description():
                         "show_preview": ParameterValue(
                             show_vision_preview,
                             value_type=bool,
-                        )
+                        ),
+                        "publish_debug_image": ParameterValue(
+                            publish_vision_debug_image,
+                            value_type=bool,
+                        ),
                     },
                 ],
                 respawn=True,

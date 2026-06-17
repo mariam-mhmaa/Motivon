@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import importlib
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import threading
@@ -16,6 +17,7 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from sensor_msgs.msg import CompressedImage
 
 from motivon_interfaces.action import VerifyIdentity
 from motivon_interfaces.msg import VisionDetection, VisionStatus
@@ -85,12 +87,25 @@ class VisionNode(Node):
         self.preview_window_name = str(
             self.get_parameter("preview_window_name").value
         )
+        self.publish_debug_image = bool(
+            self.get_parameter("publish_debug_image").value
+        )
+        self.debug_image_quality = int(
+            self.get_parameter("debug_image_quality").value
+        )
+        self.display_available = bool(
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+        )
+        self.preview_display_warning_emitted = False
 
         self.status_pub = self.create_publisher(
             VisionStatus, "/vision/status", 10
         )
         self.detection_pub = self.create_publisher(
             VisionDetection, "/vision/detection", 10
+        )
+        self.debug_image_pub = self.create_publisher(
+            CompressedImage, "/vision/debug_image/compressed", 1
         )
         self.verify_server = ActionServer(
             self,
@@ -110,6 +125,10 @@ class VisionNode(Node):
         self.active_context = ""
         self.expected_identity = ""
         self.latest_detection = DetectionSnapshot()
+        self.latest_raw_person_name = None
+        self.latest_raw_confidence = 0.0
+        self.latest_raw_is_unknown = True
+        self.latest_margin = 0.0
         self.frames_read = 0
         self.frames_processed = 0
         self.detections_seen = 0
@@ -163,7 +182,9 @@ class VisionNode(Node):
             "show_preview": False,
             "preview_width": 720,
             "preview_height": 720,
-            "preview_window_name": "Motivon Vision Preview",
+            "preview_window_name": "Face Recognition System - Pi RAW TCP Camera",
+            "publish_debug_image": False,
+            "debug_image_quality": 85,
             "identity_map_entries": [
                 "nour=Nour",
                 "ainour=Ainour",
@@ -254,6 +275,7 @@ class VisionNode(Node):
         module = importlib.util.module_from_spec(spec)
         sys.modules["motivon_realtime_camera"] = module
         spec.loader.exec_module(module)
+        module.PROCESS_EVERY_N_FRAMES = self.process_every_n_frames
         self.realtime_module = module
         self.camera_module = importlib.import_module("camera")
 
@@ -335,6 +357,7 @@ class VisionNode(Node):
                 self.camera_ok = True
                 self.frames_read += 1
                 if self.frames_read % self.process_every_n_frames != 0:
+                    self._show_preview(frame, self._latest_detection_copy())
                     continue
 
                 self._process_frame(frame)
@@ -354,6 +377,9 @@ class VisionNode(Node):
             person_name, confidence, bbox, is_unknown, margin = (
                 self.recognizer.recognize_face(frame)
             )
+            raw_person_name = person_name
+            raw_confidence = confidence
+            raw_is_unknown = is_unknown
             if self.smoothing_enabled:
                 person_name, confidence, is_unknown = (
                     self.recognizer.smooth_prediction(
@@ -385,9 +411,14 @@ class VisionNode(Node):
             self.latest_detection = detection
             if detection.face_detected:
                 self.detections_seen += 1
+            self.latest_raw_person_name = raw_person_name
+            self.latest_raw_confidence = float(raw_confidence)
+            self.latest_raw_is_unknown = bool(raw_is_unknown)
+            self.latest_margin = float(margin)
             if not self.busy and self.state != "FAULT":
                 self.state = "IDLE"
                 self.detail = detection.detail
+        self._sync_recognizer_stats(detection)
         self._publish_detection(detection)
         self._show_preview(frame, detection)
 
@@ -443,7 +474,10 @@ class VisionNode(Node):
         self.detection_pub.publish(msg)
 
     def _show_preview(self, frame, detection: DetectionSnapshot) -> None:
-        if not self.show_preview or self.realtime_module is None:
+        if (
+            not self.show_preview
+            and not self.publish_debug_image
+        ) or self.realtime_module is None:
             return
 
         try:
@@ -467,25 +501,63 @@ class VisionNode(Node):
                 bbox,
                 detection.is_unknown,
             )
-            cv2.putText(
+            with self.lock:
+                raw_person_name = self.latest_raw_person_name
+                raw_confidence = self.latest_raw_confidence
+                raw_is_unknown = self.latest_raw_is_unknown
+                frame_count = self.frames_read
+                stream_mode = self._preview_stream_mode(frame)
+
+            display_frame = self.recognizer.draw_info_panel(
                 display_frame,
-                f"{self.state}: {self.detail[:80]}",
-                (10, max(30, self.preview_height - 20)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
-                (0, 255, 255),
-                2,
+                frame_count,
+                self.smoothing_enabled,
+                raw_person_name,
+                raw_confidence,
+                detection.person_name,
+                detection.confidence,
+                raw_is_unknown,
+                detection.is_unknown,
+                stream_mode,
             )
-            cv2.imshow(self.preview_window_name, display_frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                self.show_preview = False
-                cv2.destroyWindow(self.preview_window_name)
+            self._publish_debug_image(display_frame)
+            if self.show_preview and self.display_available:
+                cv2.imshow(self.preview_window_name, display_frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    self.show_preview = False
+                    cv2.destroyWindow(self.preview_window_name)
+            elif self.show_preview and not self.preview_display_warning_emitted:
+                self.preview_display_warning_emitted = True
+                self.get_logger().warning(
+                    "WSL display is not available; use the Windows vision "
+                    "preview launched by the GUI."
+                )
         except Exception as error:
             self.show_preview = False
             self.get_logger().warning(
                 f"Vision preview disabled: {type(error).__name__}: {error}"
             )
+
+    def _publish_debug_image(self, display_frame) -> None:
+        if not self.publish_debug_image:
+            return
+        cv2 = self.realtime_module.cv2
+        quality = max(1, min(100, self.debug_image_quality))
+        ok, encoded = cv2.imencode(
+            ".jpg",
+            display_frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), quality],
+        )
+        if not ok:
+            return
+
+        msg = CompressedImage()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "camera_frame"
+        msg.format = "jpeg"
+        msg.data = encoded.tobytes()
+        self.debug_image_pub.publish(msg)
 
     def _make_preview_frame(self, frame):
         cv2 = self.realtime_module.cv2
@@ -505,6 +577,25 @@ class VisionNode(Node):
             crop_x,
             crop_y,
         )
+
+    def _preview_stream_mode(self, frame) -> str:
+        frame_h, frame_w = frame.shape[:2]
+        return (
+            f"decoded {frame_w}x{frame_h} "
+            f"(server target {self.camera_width}x{self.camera_height} "
+            f"@ {self.camera_framerate} fps)"
+        )
+
+    def _sync_recognizer_stats(self, detection: DetectionSnapshot) -> None:
+        stats = getattr(self.recognizer, "processing_stats", None)
+        if not isinstance(stats, dict):
+            return
+        stats["total_frames_processed"] = self.frames_processed
+        stats["total_detections_published"] = self.detections_seen
+        if detection.face_detected and detection.is_unknown:
+            stats["total_unknowns_detected"] = (
+                int(stats.get("total_unknowns_detected", 0)) + 1
+            )
 
     def publish_status(self) -> None:
         with self.lock:

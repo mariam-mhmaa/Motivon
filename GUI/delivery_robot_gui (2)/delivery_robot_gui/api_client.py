@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - depends on PySide6 build
 
 DEFAULT_BRIDGE_URL = os.environ.get(
     "MOTIVON_BRIDGE_URL",
-    "http://172.20.10.10:8000",
+    "http://localhost:8000",
 )
 
 

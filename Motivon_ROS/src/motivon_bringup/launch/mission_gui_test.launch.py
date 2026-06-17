@@ -17,7 +17,9 @@ def generate_launch_description():
                 launch_arguments={
                     "start_agent": "false",
                     "start_gpio_nodes": "false",
-                    "show_vision_preview": "true",
+                    "start_led_node": "false",
+                    "show_vision_preview": "false",
+                    "publish_vision_debug_image": "true",
                 }.items(),
             )
         ]

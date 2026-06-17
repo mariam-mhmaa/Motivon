@@ -26,7 +26,9 @@ vision_node:
     show_preview: false
     preview_width: 720
     preview_height: 720
-    preview_window_name: Motivon Vision Preview
+    preview_window_name: Face Recognition System - Pi RAW TCP Camera
+    publish_debug_image: false
+    debug_image_quality: 85
 
     identity_map_entries:
       - nour=Nour

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -14,6 +15,11 @@ from PySide6.QtWidgets import (
 
 from api_client import GuiBridgeClient
 from data_model import delivery_system
+from system_launcher import (
+    start_laptop_ros_stack,
+    start_pi_camera_stream,
+    start_windows_vision_preview,
+)
 
 
 class ManagerDashboardPage(QWidget):
@@ -30,6 +36,9 @@ class ManagerDashboardPage(QWidget):
         self.last_event_key = None
         self.latest_status = {}
         self.terminal_reset_pending = False
+        self.ros_process = None
+        self.camera_process = None
+        self.preview_process = None
 
         self.bridge = GuiBridgeClient(parent=self)
         self.bridge.status_received.connect(self.on_bridge_status)
@@ -40,7 +49,43 @@ class ManagerDashboardPage(QWidget):
         self.refresh_timer.timeout.connect(self.refresh_pending_requests)
         self.refresh_timer.start(2000)
 
-        root = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet(
+            """
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: rgba(7, 18, 32, 160);
+                width: 12px;
+                margin: 0;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(90, 185, 255, 120);
+                min-height: 30px;
+                border-radius: 6px;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+            """
+        )
+
+        content = QWidget()
+        scroll_area.setWidget(content)
+        outer_layout.addWidget(scroll_area)
+
+        root = QVBoxLayout(content)
         root.setContentsMargins(30, 30, 30, 30)
         root.setSpacing(18)
 
@@ -63,6 +108,8 @@ class ManagerDashboardPage(QWidget):
         subtitle.setStyleSheet("font-size: 13px; color: #8FCDF2;")
         root.addWidget(subtitle)
 
+        root.addWidget(self.create_system_launcher_section())
+
         self.pending_section = self.create_pending_requests_section()
         self.delivery_section = self.create_delivery_control_section()
         self.delivery_section.hide()
@@ -70,6 +117,65 @@ class ManagerDashboardPage(QWidget):
         root.addWidget(self.pending_section)
         root.addWidget(self.delivery_section)
         root.addStretch()
+
+    def create_system_launcher_section(self):
+        frame = QFrame()
+        frame.setStyleSheet(self.get_frame_style())
+        layout = QHBoxLayout(frame)
+        layout.setSpacing(12)
+
+        self.system_launch_label = QLabel(
+            "Start system launches Pi camera + local ROS vision test stack."
+        )
+        self.system_launch_label.setStyleSheet("color: #A8D8FF;")
+        self.system_launch_label.setWordWrap(True)
+        layout.addWidget(self.system_launch_label, 1)
+
+        self.start_system_btn = QPushButton("Start System")
+        self.start_system_btn.setMinimumWidth(150)
+        self.start_system_btn.setMinimumHeight(36)
+        self.start_system_btn.setStyleSheet(self.get_button_style("blue"))
+        self.start_system_btn.clicked.connect(self.start_system_stack)
+        layout.addWidget(self.start_system_btn)
+
+        return frame
+
+    def start_system_stack(self):
+        messages = []
+
+        try:
+            if self.camera_process is None or self.camera_process.poll() is not None:
+                self.camera_process = start_pi_camera_stream()
+                messages.append(
+                    "Pi camera SSH window started. Enter the Pi password "
+                    "there if prompted, and leave it open."
+                )
+            else:
+                messages.append("Pi camera process already started from this GUI.")
+        except Exception as error:
+            messages.append(f"Pi camera was not started automatically: {error}")
+
+        try:
+            if self.ros_process is None or self.ros_process.poll() is not None:
+                self.ros_process = start_laptop_ros_stack()
+                messages.append("WSL ROS/vision launch window started.")
+            else:
+                messages.append("ROS/vision process already started from this GUI.")
+        except Exception as error:
+            messages.append(f"ROS/vision was not started: {error}")
+
+        try:
+            if self.preview_process is None or self.preview_process.poll() is not None:
+                self.preview_process = start_windows_vision_preview()
+                messages.append("Windows vision preview window started.")
+            else:
+                messages.append("Vision preview process already started from this GUI.")
+        except Exception as error:
+            messages.append(f"Vision preview was not started: {error}")
+
+        message = "\n".join(messages)
+        self.system_launch_label.setText(message)
+        QMessageBox.information(self, "System Launch", message)
 
     def create_pending_requests_section(self):
         widget = QWidget()

@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Any, Dict, List
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import rclpy
 from geometry_msgs.msg import Twist
@@ -22,6 +22,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Bool, String, UInt32
 from std_srvs.srv import Trigger
 import uvicorn
@@ -58,6 +59,8 @@ class GuiBridgeNode(Node):
             "last_event": {},
             "bridge_time_s": time.time(),
         }
+        self.latest_vision_debug_image = b""
+        self.latest_vision_debug_image_stamp_s = 0.0
 
         self.start_client = self.create_client(
             StartMission, "/mission/start", callback_group=self.callback_group
@@ -137,6 +140,13 @@ class GuiBridgeNode(Node):
             callback_group=self.callback_group,
         )
         self.create_subscription(
+            CompressedImage,
+            "/vision/debug_image/compressed",
+            self.on_vision_debug_image,
+            qos_profile_sensor_data,
+            callback_group=self.callback_group,
+        )
+        self.create_subscription(
             String,
             "/cmd_vel_gate/status",
             self.on_gate_status,
@@ -177,6 +187,22 @@ class GuiBridgeNode(Node):
         @app.get("/api/status")
         async def status():
             return self.snapshot()
+
+        @app.get("/api/vision/debug-image.jpg")
+        async def vision_debug_image():
+            with self.lock:
+                image = self.latest_vision_debug_image
+            if not image:
+                return Response(
+                    content=b"No vision debug image available.",
+                    status_code=503,
+                    media_type="text/plain",
+                )
+            return Response(
+                content=image,
+                media_type="image/jpeg",
+                headers={"Cache-Control": "no-store"},
+            )
 
         @app.post("/api/mission/start")
         async def start_mission(request: Request):
@@ -436,6 +462,11 @@ class GuiBridgeNode(Node):
                 },
                 "detail": msg.detail,
             }
+
+    def on_vision_debug_image(self, msg: CompressedImage) -> None:
+        with self.lock:
+            self.latest_vision_debug_image = bytes(msg.data)
+            self.latest_vision_debug_image_stamp_s = time.time()
 
     def on_gate_status(self, msg: String) -> None:
         with self.lock:
