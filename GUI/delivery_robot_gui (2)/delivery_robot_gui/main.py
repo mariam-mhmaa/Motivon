@@ -13,6 +13,7 @@ from pages.analytics_dashboard_page import AnalyticsDashboardPage
 from pages.dashboard_page import DashboardPage
 from pages.request_page import RequestPage
 from pages.manual_control_page import ManualControlPage
+from pages.track_order_page import TrackOrderPage
 from widgets.sidebar import Sidebar
 from data_model import delivery_system
 
@@ -81,6 +82,7 @@ class MainWindow(QMainWindow):
         self.analytics_dashboard = AnalyticsDashboardPage()
         self.request_page = RequestPage()
         self.manual_control_page = ManualControlPage()
+        self.track_order_page = TrackOrderPage()
 
         self.pages.addWidget(self.dashboard_page)       # 0
         self.pages.addWidget(self.user_dashboard)       # 1
@@ -88,6 +90,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.analytics_dashboard)  # 3
         self.pages.addWidget(self.request_page)         # 4
         self.pages.addWidget(self.manual_control_page)  # 5
+        self.pages.addWidget(self.track_order_page)     # 6
 
         body_layout.addWidget(self.sidebar)
         body_layout.addWidget(self.pages, 1)
@@ -146,9 +149,9 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(self.main_stack)
 
         # Connect sidebar buttons
-        self.sidebar.dashboard_btn.clicked.connect(lambda: self.switch_page(0))
-        self.sidebar.request_btn.clicked.connect(lambda: self.switch_page(1))
-        self.sidebar.manual_btn.clicked.connect(lambda: self.switch_page(2))
+        self.sidebar.dashboard_btn.clicked.connect(self.open_role_dashboard)
+        self.sidebar.request_btn.clicked.connect(self.open_role_second_screen)
+        self.sidebar.manual_btn.hide()
 
         self.sidebar.set_active_button(self.sidebar.dashboard_btn)
         
@@ -219,16 +222,34 @@ class MainWindow(QMainWindow):
         # Route to appropriate dashboard
         if self.current_user_type == "user":
             self.user_dashboard.set_user(username)
+            self.track_order_page.set_user(username)
+            self.sidebar.configure_for_role("user")
             self.switch_page_direct(1)  # User dashboard
+            self.sidebar.set_active_button(self.sidebar.dashboard_btn)
         else:  # manager
             self.manager_dashboard.set_manager(username)
+            self.manual_control_page.set_manager(username)
+            self.sidebar.configure_for_role("manager")
             self.switch_page_direct(2)  # Manager dashboard
+            self.sidebar.set_active_button(self.sidebar.dashboard_btn)
     
     def logout(self):
         """Handle logout"""
         self.current_user = None
         self.current_user_type = None
         self.main_stack.setCurrentWidget(self.login_page)
+
+    def open_role_dashboard(self):
+        if self.current_user_type == "manager":
+            self.switch_page(2)
+        elif self.current_user_type == "user":
+            self.switch_page(1)
+
+    def open_role_second_screen(self):
+        if self.current_user_type == "manager":
+            self.switch_page(5)
+        elif self.current_user_type == "user":
+            self.switch_page(6)
     
     def open_new_session(self):
         """Open a new session window"""
@@ -289,7 +310,7 @@ class MainWindow(QMainWindow):
         self.user_pill.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.user_pill)
 
-        for text in ["Robot Online", "Battery 87%"]:
+        for text in ["Robot Online"]:
             pill = QLabel(text)
             pill.setObjectName("statusPill")
             pill.setAlignment(Qt.AlignCenter)
@@ -361,12 +382,10 @@ class MainWindow(QMainWindow):
         self.anim_group = anim_group
         anim_group.start()
 
-        if index == 0:
+        if index in (1, 2):
             self.sidebar.set_active_button(self.sidebar.dashboard_btn)
-        elif index == 1:
+        elif index in (5, 6):
             self.sidebar.set_active_button(self.sidebar.request_btn)
-        elif index == 2:
-            self.sidebar.set_active_button(self.sidebar.manual_btn)
     
     def closeEvent(self, event):
         """Handle window close to remove from open_windows list"""

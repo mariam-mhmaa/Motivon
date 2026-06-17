@@ -53,6 +53,7 @@ class GuiBridgeNode(Node):
             "obstacle": {},
             "vision": {},
             "vision_detection": {},
+            "mode": "AUTO",
             "cmd_vel_gate": "",
             "lid": "",
             "base_heartbeat": None,
@@ -91,8 +92,8 @@ class GuiBridgeNode(Node):
             ),
         }
 
-        self.mode_pub = self.create_publisher(String, "/system/mode", 10)
-        self.manual_pub = self.create_publisher(Twist, "/manual/cmd_vel", 10)
+        self.mode_pub = self.create_publisher(String, "/system/mode/request", 10)
+        self.manual_pub = self.create_publisher(Twist, "/manual/input", 10)
         self.software_reset_pub = self.create_publisher(
             Bool, "/base/software_reset", 10
         )
@@ -144,6 +145,13 @@ class GuiBridgeNode(Node):
             "/vision/debug_image/compressed",
             self.on_vision_debug_image,
             qos_profile_sensor_data,
+            callback_group=self.callback_group,
+        )
+        self.create_subscription(
+            String,
+            "/system/mode/status",
+            self.on_mode_status,
+            10,
             callback_group=self.callback_group,
         )
         self.create_subscription(
@@ -246,7 +254,10 @@ class GuiBridgeNode(Node):
             payload = await request.json()
             mode_value = str(payload.get("mode", "AUTO"))
             self.publish_mode(mode_value)
-            return {"success": True, "message": f"Mode set to {mode_value}."}
+            return {
+                "success": True,
+                "message": f"Mode request sent: {mode_value.upper()}.",
+            }
 
         @app.post("/api/manual-cmd")
         async def manual_cmd(request: Request):
@@ -275,6 +286,14 @@ class GuiBridgeNode(Node):
         return app
 
     def start_mission(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            current_mode = str(self.status_cache.get("mode", "AUTO")).upper()
+        if current_mode != "AUTO":
+            return {
+                "success": False,
+                "message": "Mission can only start while robot is in AUTO mode.",
+            }
+
         requests = payload.get("requests")
         if requests is None:
             requests = self._requests_from_arrays(payload)
@@ -355,6 +374,8 @@ class GuiBridgeNode(Node):
         msg = String()
         msg.data = str(mode_value).strip().upper() or "AUTO"
         self.mode_pub.publish(msg)
+        with self.lock:
+            self.status_cache["mode"] = msg.data
 
     def publish_manual_command(self, payload: Dict[str, Any]) -> None:
         msg = Twist()
@@ -475,6 +496,10 @@ class GuiBridgeNode(Node):
     def on_gate_status(self, msg: String) -> None:
         with self.lock:
             self.status_cache["cmd_vel_gate"] = msg.data
+
+    def on_mode_status(self, msg: String) -> None:
+        with self.lock:
+            self.status_cache["mode"] = msg.data.strip().upper() or "AUTO"
 
     def on_lid_status(self, msg: String) -> None:
         with self.lock:

@@ -278,6 +278,10 @@ class MissionManagerNode(Node):
             return response
 
         with self.lock:
+            if self.mode != "AUTO":
+                response.success = False
+                response.message = "Mission can only start in AUTO mode."
+                return response
             if self.state not in TERMINAL_STATES:
                 response.success = False
                 response.message = f"Mission already active: {self.state}."
@@ -411,8 +415,10 @@ class MissionManagerNode(Node):
         mode = msg.data.strip().upper()
         with self.lock:
             self.mode = mode
-        if mode == "MANUAL":
-            self._request_abort("Manual mode selected.", fault=False)
+            if mode == "MANUAL" and self.state not in TERMINAL_STATES:
+                self.detail = "Manual mode active; mission route is paused."
+            elif mode == "AUTO" and self.state not in TERMINAL_STATES:
+                self.detail = "AUTO mode active; mission route can continue."
 
     def safety_callback(self, msg: String) -> None:
         paused = msg.data.strip().upper() not in SAFETY_CLEAR_VALUES
@@ -612,10 +618,13 @@ class MissionManagerNode(Node):
         return True
 
     def _navigate_to(self, target: str) -> bool:
-        for attempt in range(1, self.service_retry_count + 1):
+        attempt = 1
+        while attempt <= self.service_retry_count:
             if self._should_stop():
                 return False
             if not self._wait_while_safety_paused():
+                return False
+            if not self._wait_while_manual_mode():
                 return False
             if not self.navigate_client.wait_for_server(
                 timeout_sec=self.navigation_server_timeout_s
@@ -624,6 +633,7 @@ class MissionManagerNode(Node):
                     "Waiting for /navigation/navigate_to_target action server "
                     f"({attempt}/{self.service_retry_count})."
                 )
+                attempt += 1
                 continue
 
             goal = NavigateToTarget.Goal()
@@ -635,17 +645,26 @@ class MissionManagerNode(Node):
                 self.service_wait_timeout_s,
                 f"send navigation goal {target}",
             ):
+                attempt += 1
                 continue
             goal_handle = send_future.result()
             if goal_handle is None or not goal_handle.accepted:
                 self.detail = f"Navigation rejected {target}; resetting HOME."
                 self._prepare_home()
+                attempt += 1
                 continue
 
             with self.lock:
                 self.active_goal_handle = goal_handle
             result_future = goal_handle.get_result_async()
-            if not self._wait_for_navigation_result(result_future, target):
+            wait_result = self._wait_for_navigation_result(result_future, target)
+            if wait_result == "manual_pause":
+                with self.lock:
+                    self.active_goal_handle = None
+                if not self._wait_while_manual_mode():
+                    return False
+                continue
+            if wait_result != "done":
                 return False
             try:
                 result = result_future.result().result
@@ -675,6 +694,10 @@ class MissionManagerNode(Node):
             if self._should_stop():
                 self._cancel_active_navigation()
                 return False
+            if self.mode == "MANUAL":
+                self.detail = "Manual mode active; navigation goal paused."
+                self._cancel_active_navigation()
+                return "manual_pause"
             if self.safety_paused:
                 started += 0.10
             elif time.monotonic() - started > self.navigation_goal_timeout_s:
@@ -682,7 +705,7 @@ class MissionManagerNode(Node):
                 self._fault(f"Navigation to {target} timed out.")
                 return False
             time.sleep(0.10)
-        return True
+        return "done"
 
     def _verify_identity_with_retries(
         self,
@@ -918,6 +941,14 @@ class MissionManagerNode(Node):
         while self.safety_paused:
             if self._should_stop():
                 return False
+            time.sleep(0.10)
+        return True
+
+    def _wait_while_manual_mode(self) -> bool:
+        while self.mode == "MANUAL":
+            if self._should_stop():
+                return False
+            self.detail = "Manual mode active; waiting for AUTO mode."
             time.sleep(0.10)
         return True
 

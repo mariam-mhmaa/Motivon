@@ -32,6 +32,8 @@ setup(
     entry_points={
         "console_scripts": [
             "cmd_vel_gate_node = motivon_control.cmd_vel_gate_node:main",
+            "manual_control_node = motivon_control.manual_control_node:main",
+            "mode_manager_node = motivon_control.mode_manager_node:main",
         ],
     },
 )

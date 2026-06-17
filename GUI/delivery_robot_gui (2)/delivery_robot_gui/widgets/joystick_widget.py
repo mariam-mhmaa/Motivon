@@ -77,8 +77,12 @@ class JoystickWidget(QWidget):
 
     def mouseReleaseEvent(self, event):
         self.dragging = False
-        self.knob_pos = QPointF(self.center)
+        self.reset_knob()
         self.joystickMoved.emit(0.0, 0.0)
+
+    def reset_knob(self):
+        self.dragging = False
+        self.knob_pos = QPointF(self.center)
         self.update()
 
     def update_knob(self, pos):

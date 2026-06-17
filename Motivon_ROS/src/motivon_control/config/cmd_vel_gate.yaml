@@ -4,3 +4,17 @@ cmd_vel_gate_node:
     publish_rate_hz: 25.0
     command_stale_timeout_s: 0.50
     require_obstacle_fresh_in_auto: true
+
+mode_manager_node:
+  ros__parameters:
+    initial_mode: AUTO
+    publish_rate_hz: 5.0
+
+manual_control_node:
+  ros__parameters:
+    publish_rate_hz: 25.0
+    input_timeout_s: 0.35
+    deadband: 0.08
+    max_linear_x_mps: 0.10
+    max_linear_y_mps: 0.08
+    max_angular_z_rad_s: 0.35

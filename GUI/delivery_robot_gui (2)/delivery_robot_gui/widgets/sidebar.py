@@ -91,3 +91,19 @@ class Sidebar(QWidget):
         for btn in self.buttons:
             btn.setStyleSheet(self.default_style())
         active_button.setStyleSheet(self.active_style())
+
+    def configure_for_role(self, role):
+        if role == "manager":
+            self.dashboard_btn.setText("Dashboard")
+            self.request_btn.setText("Manual Mode")
+            self.request_btn.show()
+            self.manual_btn.hide()
+            self.buttons = [self.dashboard_btn, self.request_btn]
+        else:
+            self.dashboard_btn.setText("Orders")
+            self.request_btn.setText("Track Order")
+            self.request_btn.show()
+            self.manual_btn.hide()
+            self.buttons = [self.dashboard_btn, self.request_btn]
+        for btn in self.buttons:
+            btn.setStyleSheet(self.default_style())

@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QLineEdit, QFrame, QTableWidget, QTableWidgetItem, QMessageBox
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QColor
 
 from data_model import delivery_system
@@ -16,6 +16,9 @@ class UserDashboardPage(QWidget):
     def __init__(self):
         super().__init__()
         self.current_user = None
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.refresh_history)
+        self.refresh_timer.start(1500)
         
         root = QVBoxLayout(self)
         root.setContentsMargins(30, 30, 30, 30)
@@ -249,12 +252,21 @@ class UserDashboardPage(QWidget):
             self.history_table.setItem(row, 1, QTableWidgetItem(request.object_requested))
             self.history_table.setItem(row, 2, QTableWidgetItem(request.target_station))
             
-            status_item = QTableWidgetItem(request.status.upper())
+            display_status = {
+                "completed": "DELIVERED",
+                "delivering": "DELIVERING",
+                "selected": "SELECTED",
+                "pending": "PENDING",
+                "cancelled": "CANCELLED",
+            }.get(request.status, request.status.upper())
+            status_item = QTableWidgetItem(display_status)
             # Color code by status
             if request.status == "completed":
                 status_item.setForeground(QColor("#90EE90"))
             elif request.status == "delivering":
                 status_item.setForeground(QColor("#FFD700"))
+            elif request.status == "selected":
+                status_item.setForeground(QColor("#B38CFF"))
             elif request.status == "cancelled":
                 status_item.setForeground(QColor("#FF6B6B"))
             else:

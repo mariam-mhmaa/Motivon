@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from api_client import GuiBridgeClient
 from data_model import delivery_system
+from mission_display import destination_text
 from system_launcher import start_windows_vision_preview
 
 
@@ -32,6 +33,7 @@ class ManagerDashboardPage(QWidget):
         self.pending_selected_request_ids = set()
         self.last_event_key = None
         self.latest_status = {}
+        self.current_mode = "AUTO"
         self.terminal_reset_pending = False
         self.preview_process = None
 
@@ -181,6 +183,13 @@ class ManagerDashboardPage(QWidget):
         button_layout = QHBoxLayout()
         button_layout.addStretch()
 
+        self.auto_mode_btn = QPushButton("Set AUTO Mode")
+        self.auto_mode_btn.setMinimumWidth(150)
+        self.auto_mode_btn.setMinimumHeight(40)
+        self.auto_mode_btn.setStyleSheet(self.get_button_style("blue"))
+        self.auto_mode_btn.clicked.connect(self.set_auto_mode)
+        button_layout.addWidget(self.auto_mode_btn)
+
         refresh_btn = QPushButton("Refresh")
         refresh_btn.setMinimumWidth(100)
         refresh_btn.setStyleSheet(self.get_button_style("blue"))
@@ -207,24 +216,53 @@ class ManagerDashboardPage(QWidget):
 
         layout.addWidget(self.create_section_label("Active Delivery"))
 
+        cards_layout = QHBoxLayout()
+        cards_layout.setSpacing(14)
+
         status_frame = QFrame()
         status_frame.setStyleSheet(self.get_frame_style())
         status_layout = QVBoxLayout(status_frame)
-        status_layout.setSpacing(10)
+        status_layout.setSpacing(8)
 
         self.state_display = QLabel("IDLE")
         self.state_display.setStyleSheet(
-            "color: #FFD700; font-weight: bold; font-size: 16px;"
+            "color: #FFD700; font-weight: 850; font-size: 28px;"
         )
+        state_title = QLabel("Mission State")
+        state_title.setStyleSheet("color: #8FCDF2; font-weight: 800;")
+        status_layout.addWidget(state_title)
+        status_layout.addWidget(self.state_display)
+
+        destination_frame = QFrame()
+        destination_frame.setStyleSheet(self.get_frame_style())
+        destination_layout = QVBoxLayout(destination_frame)
+        destination_layout.setSpacing(8)
+        destination_title = QLabel("Destination")
+        destination_title.setStyleSheet("color: #8FCDF2; font-weight: 800;")
+        self.destination_display = QLabel("Home")
+        self.destination_display.setWordWrap(True)
+        self.destination_display.setStyleSheet(
+            "color: #F4FBFF; font-weight: 850; font-size: 28px;"
+        )
+        destination_layout.addWidget(destination_title)
+        destination_layout.addWidget(self.destination_display)
+
+        cards_layout.addWidget(status_frame, 1)
+        cards_layout.addWidget(destination_frame, 1)
+        layout.addLayout(cards_layout)
+
+        detail_frame = QFrame()
+        detail_frame.setStyleSheet(self.get_frame_style())
+        detail_layout = QVBoxLayout(detail_frame)
+        detail_layout.setSpacing(10)
         self.step_display = QLabel("-")
         self.step_display.setStyleSheet("color: #87CEEB;")
         self.queue_display = QLabel("0 delivery request(s) selected")
         self.queue_display.setStyleSheet("color: #87CEEB;")
 
-        status_layout.addWidget(self.label_row("System State:", self.state_display))
-        status_layout.addWidget(self.label_row("Current Step:", self.step_display))
-        status_layout.addWidget(self.label_row("Queue:", self.queue_display))
-        layout.addWidget(status_frame)
+        detail_layout.addWidget(self.label_row("Current Step:", self.step_display))
+        detail_layout.addWidget(self.label_row("Queue:", self.queue_display))
+        layout.addWidget(detail_frame)
 
         control_frame = QFrame()
         control_frame.setStyleSheet(self.get_frame_style())
@@ -269,14 +307,6 @@ class ManagerDashboardPage(QWidget):
         self.user_verified_btn.clicked.connect(self.user_verified)
         self.user_verified_btn.hide()
         action_layout.addWidget(self.user_verified_btn)
-
-        self.user_received_btn = QPushButton("Confirm Receipt")
-        self.user_received_btn.setMinimumWidth(170)
-        self.user_received_btn.setMinimumHeight(40)
-        self.user_received_btn.setStyleSheet(self.get_button_style("green"))
-        self.user_received_btn.clicked.connect(self.user_received_item)
-        self.user_received_btn.hide()
-        action_layout.addWidget(self.user_received_btn)
 
         cancel_btn = QPushButton("Cancel Delivery")
         cancel_btn.setMinimumWidth(150)
@@ -452,6 +482,15 @@ class ManagerDashboardPage(QWidget):
     def update_start_button_state(self):
         self.start_delivery_btn.setEnabled(bool(self.pending_selected_request_ids))
 
+    def set_auto_mode(self):
+        response = self.bridge.set_mode("AUTO")
+        if not response.get("success"):
+            QMessageBox.warning(
+                self,
+                "Mode Change Failed",
+                response.get("message", "Could not switch to AUTO mode."),
+            )
+
     def get_selected_requests(self):
         self.capture_pending_selection()
         selected = []
@@ -469,6 +508,13 @@ class ManagerDashboardPage(QWidget):
         return selected
 
     def open_lid_for_manager(self):
+        if self.current_mode != "AUTO":
+            QMessageBox.warning(
+                self,
+                "AUTO Mode Required",
+                "Robot must be in AUTO mode before starting a mission.",
+            )
+            return
         selected = self.get_selected_requests()
         if not selected:
             QMessageBox.warning(
@@ -508,6 +554,13 @@ class ManagerDashboardPage(QWidget):
             )
 
     def close_lid_and_start(self):
+        if self.current_mode != "AUTO":
+            QMessageBox.warning(
+                self,
+                "AUTO Mode Required",
+                "Robot must be in AUTO mode before starting navigation.",
+            )
+            return
         response = self.bridge.confirm_manager_loaded()
         if response.get("success"):
             for request_id in self.active_mission_request_ids:
@@ -526,15 +579,6 @@ class ManagerDashboardPage(QWidget):
                 self,
                 "User Verification Failed",
                 response.get("message", "Could not confirm user."),
-            )
-
-    def user_received_item(self):
-        response = self.bridge.confirm_user_received()
-        if not response.get("success"):
-            QMessageBox.warning(
-                self,
-                "Receipt Failed",
-                response.get("message", "Could not confirm receipt."),
             )
 
     def cancel_delivery(self):
@@ -561,7 +605,6 @@ class ManagerDashboardPage(QWidget):
         self.manager_verified_btn.hide()
         self.close_start_btn.hide()
         self.user_verified_btn.hide()
-        self.user_received_btn.hide()
         self.lid_open_indicator.hide()
         self.terminal_reset_pending = False
         self.refresh_pending_requests()
@@ -575,6 +618,11 @@ class ManagerDashboardPage(QWidget):
 
     def on_bridge_status(self, status):
         self.latest_status = status
+        self.current_mode = str(status.get("mode", "AUTO")).upper()
+        if hasattr(self, "auto_mode_btn"):
+            self.auto_mode_btn.setText(
+                "AUTO Mode Active" if self.current_mode == "AUTO" else "Set AUTO Mode"
+            )
         mission = status.get("mission", {})
         if mission:
             self.apply_mission_status(mission)
@@ -586,6 +634,7 @@ class ManagerDashboardPage(QWidget):
         state = mission.get("state", "-")
         detail = mission.get("detail", "")
         self.state_display.setText(state)
+        self.destination_display.setText(destination_text(mission))
         self.step_display.setText(detail or "-")
         self.delivery_status_label.setText(self.format_mission_detail(mission))
 
@@ -598,9 +647,6 @@ class ManagerDashboardPage(QWidget):
         self.lid_open_indicator.setVisible(state == "WAITING_FOR_MANAGER_LOAD")
         self.user_verified_btn.setVisible(
             bool(mission.get("can_confirm_user_verified"))
-        )
-        self.user_received_btn.setVisible(
-            bool(mission.get("can_confirm_user_received"))
         )
 
         if (
