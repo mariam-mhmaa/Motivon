@@ -1,14 +1,18 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
     udp_port = LaunchConfiguration("udp_port")
     start_agent = LaunchConfiguration("start_agent")
+    start_gpio_nodes = LaunchConfiguration("start_gpio_nodes")
+    show_vision_preview = LaunchConfiguration("show_vision_preview")
 
     base_launch = PathJoinSubstitution(
         [FindPackageShare("motivon_bringup"), "launch", "base_system.launch.py"]
@@ -42,6 +46,18 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("udp_port", default_value="8888"),
             DeclareLaunchArgument("start_agent", default_value="true"),
+            DeclareLaunchArgument(
+                "start_gpio_nodes",
+                default_value="true",
+                description=(
+                    "Start Raspberry Pi GPIO nodes for lid and ultrasonic sensors."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "show_vision_preview",
+                default_value="false",
+                description="Open an OpenCV preview window from the vision node.",
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(base_launch),
                 launch_arguments={
@@ -72,6 +88,7 @@ def generate_launch_description():
                 parameters=[obstacle_params],
                 respawn=True,
                 respawn_delay=2.0,
+                condition=IfCondition(start_gpio_nodes),
             ),
             Node(
                 package="motivon_obstacles",
@@ -99,13 +116,22 @@ def generate_launch_description():
                 parameters=[lid_params],
                 respawn=True,
                 respawn_delay=2.0,
+                condition=IfCondition(start_gpio_nodes),
             ),
             Node(
                 package="motivon_vision",
                 executable="vision_node",
                 name="vision_node",
                 output="screen",
-                parameters=[vision_params],
+                parameters=[
+                    vision_params,
+                    {
+                        "show_preview": ParameterValue(
+                            show_vision_preview,
+                            value_type=bool,
+                        )
+                    },
+                ],
                 respawn=True,
                 respawn_delay=2.0,
             ),

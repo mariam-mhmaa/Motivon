@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 import pickle
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from collections import deque
@@ -35,6 +36,50 @@ CAMERA_FRAMERATE = 8
 PROCESS_EVERY_N_FRAMES = 2  # 2 = process every second frame, reducing recognition lag.
 DISPLAY_WIDTH = 720         # Square display to avoid stretching the feed.
 DISPLAY_HEIGHT = 720
+
+
+def install_numpy_pickle_compat():
+    """Allow NumPy 2 pickles to load in environments exposing NumPy 1 paths."""
+    try:
+        import numpy.core.multiarray as multiarray
+        import numpy.core.numeric as numeric
+    except Exception:
+        return
+
+    try:
+        import numpy._core as private_core
+    except Exception:
+        private_core = np.core
+
+    sys.modules.setdefault("numpy._core", private_core)
+    sys.modules.setdefault("numpy._core.multiarray", multiarray)
+    sys.modules.setdefault("numpy._core.numeric", numeric)
+
+
+def find_haar_cascade_path():
+    cascade_name = "haarcascade_frontalface_default.xml"
+    candidates = []
+
+    data_dir = getattr(getattr(cv2, "data", None), "haarcascades", None)
+    if data_dir:
+        candidates.append(Path(data_dir) / cascade_name)
+
+    cv2_file = getattr(cv2, "__file__", "")
+    if cv2_file:
+        candidates.append(Path(cv2_file).resolve().parent / "data" / cascade_name)
+
+    candidates.extend(
+        [
+            Path("/usr/share/opencv4/haarcascades") / cascade_name,
+            Path("/usr/local/share/opencv4/haarcascades") / cascade_name,
+        ]
+    )
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    return cascade_name
 
 
 def compute_lbp_histogram(gray):
@@ -96,7 +141,8 @@ class FaceRecognitionSystem:
 
         models_path = Path(__file__).parent / "models"
 
-        print("📦 Loading trained models...")
+        print("Loading trained models...")
+        install_numpy_pickle_compat()
         with open(models_path / "classifier.pkl", "rb") as f:
             self.classifier = pickle.load(f)
 
@@ -132,8 +178,8 @@ class FaceRecognitionSystem:
         self.class_prototypes = self._build_class_prototypes()
         self.class_distance_thresholds = self._build_class_distance_thresholds()
 
-        print("🔍 Initializing face detector...")
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        print("Initializing face detector...")
+        cascade_path = find_haar_cascade_path()
         self.face_cascade = cv2.CascadeClassifier(cascade_path)
 
         self.prediction_history = deque(maxlen=7)
@@ -172,7 +218,7 @@ class FaceRecognitionSystem:
         if use_external_calibration:
             self._load_external_calibration()
 
-        print("✓ System ready!")
+        print("System ready!")
 
     def _load_external_calibration(self):
         """Load optional calibration generated from external/negative faces."""
@@ -217,14 +263,14 @@ class FaceRecognitionSystem:
                             upper = base_class_min[cls_name] + max_class_delta_by_class.get(cls_name, 0.08)
                             self.class_min_confidence[cls_name] = min(cls_val, upper)
 
-            print(f"🧪 Loaded external calibration: {calibration_path.name}")
+            print(f"Loaded external calibration: {calibration_path.name}")
             print(
                 f"   threshold={self.confidence_threshold:.3f}, "
                 f"margin={self.margin_threshold:.3f}, "
                 f"class_min={self.class_min_confidence}"
             )
         except Exception as e:
-            print(f"⚠️  Could not load external calibration ({calibration_path.name}): {e}")
+            print(f"Could not load external calibration ({calibration_path.name}): {e}")
 
     def publish_detection(self, person_name, confidence, bbox, is_unknown):
         """Create and store a structured detection message with confidence score."""
@@ -283,7 +329,7 @@ class FaceRecognitionSystem:
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(log_data, f, indent=2)
 
-        print(f"✓ Detection log saved: {filename}")
+        print(f"Detection log saved: {filename}")
         return filename
 
     def _blend_scores(self, features):
@@ -769,9 +815,9 @@ class FaceRecognitionSystem:
             f"Published: {self.processing_stats['total_detections_published']}",
             "",
             "Recognized classes:",
-            "  • Ainour, Mariam",
-            "  • Nour, Zeina",
-            f"  • UNKNOWN (if <{self.confidence_threshold:.2f})",
+            "  - Ainour, Mariam",
+            "  - Nour, Zeina",
+            f"  - UNKNOWN (if <{self.confidence_threshold:.2f})",
         ]
 
         y_pos = 30
@@ -818,7 +864,7 @@ class FaceRecognitionSystem:
         try:
             cap.open()
         except Exception as e:
-            print("❌ Error: Could not open raw TCP Raspberry Pi camera stream.")
+            print("Error: Could not open raw TCP Raspberry Pi camera stream.")
             print("Make sure the Pi raw BGR stream command is running first.")
             print(f"Error: {e}")
             return
@@ -949,28 +995,28 @@ class FaceRecognitionSystem:
                 key = cv2.waitKey(1) & 0xFF
 
                 if key == ord("q"):
-                    print("\n🛑 Exiting camera feed...")
+                    print("\nExiting camera feed...")
                     break
                 elif key == ord(" "):
                     smoothing_enabled = not smoothing_enabled
                     status = "ENABLED" if smoothing_enabled else "DISABLED"
-                    print(f"✓ Smoothing {status}")
+                    print(f"Smoothing {status}")
                 elif key == ord("c"):
                     filename = f"capture_{frame_count}.jpg"
                     cv2.imwrite(filename, display_frame)
-                    print(f"✓ Screenshot saved: {filename}")
+                    print(f"Screenshot saved: {filename}")
                 elif key == ord("s"):
                     self.save_detection_log()
 
         except KeyboardInterrupt:
-            print("\n🛑 Interrupted by user. Closing camera feed...")
+            print("\nInterrupted by user. Closing camera feed...")
 
         finally:
             cap.release()
             cv2.destroyAllWindows()
 
             print("\n" + "=" * 70)
-            print("✓ Camera session ended")
+            print("Camera session ended")
             print(f"  Frames processed: {self.processing_stats['total_frames_processed']}")
             print(f"  Detections published: {self.processing_stats['total_detections_published']}")
             print(f"  Unknown detections: {self.processing_stats['total_unknowns_detected']}")

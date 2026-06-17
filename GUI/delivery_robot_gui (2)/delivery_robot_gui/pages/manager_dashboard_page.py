@@ -517,8 +517,32 @@ class ManagerDashboardPage(QWidget):
             state in ("COMPLETE", "ABORTED", "FAULTED")
             and not self.terminal_reset_pending
         ):
+            self.reconcile_terminal_mission(mission)
             self.terminal_reset_pending = True
             QTimer.singleShot(600, self.complete_delivery_cycle)
+
+    def reconcile_terminal_mission(self, mission):
+        if not self.active_mission_request_ids:
+            return
+
+        state = mission.get("state", "-")
+        completed_count = int(mission.get("completed_count", 0) or 0)
+        total_count = int(mission.get("total_count", 0) or 0)
+
+        if state == "COMPLETE" and completed_count >= total_count:
+            for request_id in list(self.active_mission_request_ids):
+                delivery_system.update_request_status(request_id, "completed")
+            self.active_mission_request_ids.clear()
+            return
+
+        unfinished = [
+            request_id
+            for request_id in self.active_mission_request_ids
+            if request_id not in self.completed_event_ids
+        ]
+        delivery_system.return_requests_to_pending(unfinished)
+        self.pending_selected_request_ids.update(unfinished)
+        self.active_mission_request_ids.difference_update(unfinished)
 
     @staticmethod
     def format_mission_detail(mission):
@@ -556,7 +580,13 @@ class ManagerDashboardPage(QWidget):
             self.completed_event_ids.add(request_id)
             self.active_mission_request_ids.discard(request_id)
             self.update_delivery_display()
+        elif event_type == "REQUEST_SKIPPED_UNVERIFIED" and request_id:
+            delivery_system.update_request_status(request_id, "pending")
+            self.pending_selected_request_ids.add(request_id)
+            self.active_mission_request_ids.discard(request_id)
+            self.update_delivery_display()
         elif event_type in ("MISSION_CANCELLED", "MISSION_FAULTED"):
+            self.pending_selected_request_ids.update(self.active_mission_request_ids)
             delivery_system.return_requests_to_pending(
                 list(self.active_mission_request_ids)
             )

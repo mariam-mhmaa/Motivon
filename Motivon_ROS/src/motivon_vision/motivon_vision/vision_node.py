@@ -79,6 +79,12 @@ class VisionNode(Node):
         self.reconnect_period_s = float(
             self.get_parameter("reconnect_period_s").value
         )
+        self.show_preview = bool(self.get_parameter("show_preview").value)
+        self.preview_width = int(self.get_parameter("preview_width").value)
+        self.preview_height = int(self.get_parameter("preview_height").value)
+        self.preview_window_name = str(
+            self.get_parameter("preview_window_name").value
+        )
 
         self.status_pub = self.create_publisher(
             VisionStatus, "/vision/status", 10
@@ -154,6 +160,10 @@ class VisionNode(Node):
             "default_min_confidence": 0.20,
             "status_period_s": 0.20,
             "reconnect_period_s": 2.0,
+            "show_preview": False,
+            "preview_width": 720,
+            "preview_height": 720,
+            "preview_window_name": "Motivon Vision Preview",
             "identity_map_entries": [
                 "nour=Nour",
                 "ainour=Ainour",
@@ -379,6 +389,7 @@ class VisionNode(Node):
                 self.state = "IDLE"
                 self.detail = detection.detail
         self._publish_detection(detection)
+        self._show_preview(frame, detection)
 
     def _make_detection_snapshot(
         self,
@@ -430,6 +441,70 @@ class VisionNode(Node):
         msg.bbox_height = int(detection.bbox_height)
         msg.detail = detection.detail
         self.detection_pub.publish(msg)
+
+    def _show_preview(self, frame, detection: DetectionSnapshot) -> None:
+        if not self.show_preview or self.realtime_module is None:
+            return
+
+        try:
+            cv2 = self.realtime_module.cv2
+            display_frame, scale_x, scale_y, crop_x, crop_y = (
+                self._make_preview_frame(frame)
+            )
+            bbox = None
+            if detection.face_detected:
+                bbox = [
+                    int((detection.bbox_x1 - crop_x) * scale_x),
+                    int((detection.bbox_y1 - crop_y) * scale_y),
+                    int((detection.bbox_x2 - crop_x) * scale_x),
+                    int((detection.bbox_y2 - crop_y) * scale_y),
+                ]
+
+            display_frame = self.recognizer.draw_predictions(
+                display_frame,
+                detection.person_name,
+                detection.confidence,
+                bbox,
+                detection.is_unknown,
+            )
+            cv2.putText(
+                display_frame,
+                f"{self.state}: {self.detail[:80]}",
+                (10, max(30, self.preview_height - 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 255),
+                2,
+            )
+            cv2.imshow(self.preview_window_name, display_frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                self.show_preview = False
+                cv2.destroyWindow(self.preview_window_name)
+        except Exception as error:
+            self.show_preview = False
+            self.get_logger().warning(
+                f"Vision preview disabled: {type(error).__name__}: {error}"
+            )
+
+    def _make_preview_frame(self, frame):
+        cv2 = self.realtime_module.cv2
+        frame_h, frame_w = frame.shape[:2]
+        target_w = max(1, self.preview_width)
+        target_h = max(1, self.preview_height)
+
+        crop_size = min(frame_w, frame_h)
+        crop_x = (frame_w - crop_size) // 2
+        crop_y = (frame_h - crop_size) // 2
+        square_frame = frame[crop_y:crop_y + crop_size, crop_x:crop_x + crop_size]
+        display_frame = cv2.resize(square_frame, (target_w, target_h))
+        return (
+            display_frame,
+            target_w / crop_size,
+            target_h / crop_size,
+            crop_x,
+            crop_y,
+        )
 
     def publish_status(self) -> None:
         with self.lock:
@@ -689,6 +764,11 @@ class VisionNode(Node):
                 self.camera_server.stop_server()
             except Exception as error:
                 self.get_logger().warning(f"Camera server stop failed: {error}")
+        if self.show_preview and self.realtime_module is not None:
+            try:
+                self.realtime_module.cv2.destroyWindow(self.preview_window_name)
+            except Exception:
+                pass
         return super().destroy_node()
 
 
