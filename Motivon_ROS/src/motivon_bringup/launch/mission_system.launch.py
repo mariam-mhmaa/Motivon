@@ -28,6 +28,9 @@ def generate_launch_description():
     lid_params = PathJoinSubstitution(
         [FindPackageShare("motivon_lid"), "config", "lid_params.yaml"]
     )
+    led_params = PathJoinSubstitution(
+        [FindPackageShare("motivon_led"), "config", "led_params.yaml"]
+    )
     mission_params = PathJoinSubstitution(
         [FindPackageShare("motivon_mission"), "config", "mission_params.yaml"]
     )
@@ -97,6 +100,15 @@ def generate_launch_description():
                 name="lid_control_node",
                 output="screen",
                 parameters=[lid_params],
+                respawn=True,
+                respawn_delay=2.0,
+            ),
+            Node(
+                package="motivon_led",
+                executable="led_strip_node",
+                name="led_strip_node",
+                output="screen",
+                parameters=[led_params],
                 respawn=True,
                 respawn_delay=2.0,
             ),

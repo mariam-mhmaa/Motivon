@@ -559,6 +559,10 @@ class MissionManagerNode(Node):
         return True
 
     def _hold_no_request_station(self, station: str) -> bool:
+        self._set_state(
+            "NO_REQUEST_HOLDING_3S",
+            f"No request at {station}; holding {self.no_request_hold_s:.1f} s.",
+        )
         deadline = time.monotonic() + self.no_request_hold_s
         while time.monotonic() < deadline:
             if self._should_stop():
