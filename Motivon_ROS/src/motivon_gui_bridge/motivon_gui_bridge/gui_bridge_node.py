@@ -192,6 +192,7 @@ class GuiBridgeNode(Node):
         async def vision_debug_image():
             with self.lock:
                 image = self.latest_vision_debug_image
+                stamp_s = self.latest_vision_debug_image_stamp_s
             if not image:
                 return Response(
                     content=b"No vision debug image available.",
@@ -201,7 +202,10 @@ class GuiBridgeNode(Node):
             return Response(
                 content=image,
                 media_type="image/jpeg",
-                headers={"Cache-Control": "no-store"},
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Vision-Image-Age-S": f"{time.time() - stamp_s:.3f}",
+                },
             )
 
         @app.post("/api/mission/start")

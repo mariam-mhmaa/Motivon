@@ -1,8 +1,8 @@
 """Helpers for starting the local demo ROS stack from the Windows GUI."""
 
+import base64
 import os
 from pathlib import Path
-import shlex
 import shutil
 import subprocess
 import sys
@@ -27,6 +27,15 @@ def _windows_path_to_wsl(path: Path) -> str:
     return f"/mnt/{drive}/{rest}"
 
 
+def _ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _remote_bash_command(script: str) -> str:
+    encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    return f"printf %s {encoded} | base64 -d | bash"
+
+
 def start_laptop_ros_stack():
     """Start the WSL laptop test launch in its own console window."""
     ros_dir = _windows_path_to_wsl(MOTIVON_ROS_DIR)
@@ -49,30 +58,41 @@ def start_pi_camera_stream(pi_ssh: str = DEFAULT_PI_SSH):
     if not ssh_exe:
         raise RuntimeError("ssh.exe was not found on PATH.")
 
-    remote_script = (
-        "echo 'Motivon camera stream starting on TCP 8890'; "
-        "echo 'Pi IP:'; hostname -I; "
-        "pkill -f '[c]amera.py' || true; "
-        "pkill -x rpicam-vid || true; "
-        "pkill -x libcamera-vid || true; "
-        "pkill -x ffmpeg || true; "
-        "echo 'Starting rpicam-vid -> ffmpeg stream. Leave this window open.'; "
-        "rpicam-vid -t 0 -n --width 1280 --height 720 --framerate 8 "
-        "--codec mjpeg --quality 95 -o - | "
-        "ffmpeg -hide_banner -loglevel info -fflags nobuffer -flags low_delay "
-        "-f mjpeg -i pipe:0 -c:v copy -f mjpeg "
-        "'tcp://0.0.0.0:8890?listen=1'"
+    remote_script = "\n".join(
+        [
+            "set -e",
+            "echo 'Motivon camera stream starting on TCP 8890'",
+            "echo 'Pi IP:'",
+            "hostname -I",
+            "pkill -f '[c]amera.py' || true",
+            "pkill -x rpicam-vid || true",
+            "pkill -x libcamera-vid || true",
+            "pkill -x ffmpeg || true",
+            "echo 'Starting rpicam-vid -> ffmpeg stream. Leave this window open.'",
+            "rpicam-vid -t 0 -n --width 1280 --height 720 --framerate 8 "
+            "--codec mjpeg --quality 95 -o - | "
+            "ffmpeg -hide_banner -loglevel info -fflags nobuffer -flags low_delay "
+            "-f mjpeg -i pipe:0 -c:v copy -f mjpeg "
+            "'tcp://0.0.0.0:8890?listen=1'",
+        ]
     )
-    remote_command = "bash -lc " + shlex.quote(remote_script)
-    ssh_command = subprocess.list2cmdline([ssh_exe, pi_ssh, remote_command])
-    cmd_command = (
-        "echo Starting Pi camera over SSH. "
-        "Enter the Pi password if prompted. && "
-        f"{ssh_command} && "
-        "echo Pi camera command ended."
+    remote_command = _remote_bash_command(remote_script)
+    powershell_command = (
+        "Write-Host 'Starting Pi camera over SSH. "
+        "Enter the Pi password if prompted.'; "
+        f"& {_ps_quote(ssh_exe)} {_ps_quote(pi_ssh)} {_ps_quote(remote_command)}; "
+        "Write-Host 'Pi camera command ended.'"
     )
     return subprocess.Popen(
-        ["cmd.exe", "/k", cmd_command],
+        [
+            "powershell.exe",
+            "-NoExit",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            powershell_command,
+        ],
         cwd=str(REPO_ROOT),
         creationflags=_creation_flags(),
     )

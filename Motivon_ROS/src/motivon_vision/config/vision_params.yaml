@@ -6,8 +6,8 @@ vision_node:
 
     camera_host: 172.20.10.10
     camera_port: 8890
-    camera_width: 1280
-    camera_height: 720
+    camera_width: 640
+    camera_height: 480
     camera_framerate: 8
     auto_start_camera_server: false
 
@@ -28,7 +28,7 @@ vision_node:
     preview_height: 720
     preview_window_name: Face Recognition System - Pi RAW TCP Camera
     publish_debug_image: false
-    debug_image_quality: 85
+    debug_image_quality: 95
 
     identity_map_entries:
       - nour=Nour

@@ -18,6 +18,7 @@ Usage:
 
 import subprocess
 import socket
+import select
 import numpy as np
 import cv2
 import threading
@@ -72,6 +73,11 @@ class PiCamera:
         self.buffer = bytearray()
         self.process = None
         self.is_running = False
+        self.reader_thread = None
+        self.frame_lock = threading.Condition()
+        self.latest_frame = None
+        self.latest_frame_sequence = 0
+        self.last_read_sequence = 0
         
     # =====================================================================
     # CLIENT MODE: Connect to existing TCP stream on Raspberry Pi
@@ -84,12 +90,20 @@ class PiCamera:
         
         logger.info(f"🔌 Connecting to camera at {self.host}:{self.port}...")
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
         self.sock.settimeout(10)
         
         try:
             self.sock.connect((self.host, self.port))
-            self.sock.settimeout(10)
+            self.sock.settimeout(1.0)
             self.is_running = True
+            self.reader_thread = threading.Thread(
+                target=self._reader_loop,
+                name="pi_camera_reader",
+                daemon=True,
+            )
+            self.reader_thread.start()
             logger.info("✓ Connected to camera stream")
             return True
         except Exception as e:
@@ -108,43 +122,93 @@ class PiCamera:
         
         if not self.is_running or self.sock is None:
             return False, None
-        
-        while True:
-            # Look for JPEG markers (MJPEG format)
-            start = self.buffer.find(b'\xff\xd8')  # JPEG start
-            end = self.buffer.find(b'\xff\xd9')    # JPEG end
-            
-            if start != -1 and end != -1 and end > start:
-                # Extract JPEG data
-                jpg_data = bytes(self.buffer[start:end + 2])
-                del self.buffer[:end + 2]
-                
-                # Decode frame
+
+        deadline = time.monotonic() + 1.0
+        with self.frame_lock:
+            while (
+                (
+                    self.latest_frame is None
+                    or self.latest_frame_sequence == self.last_read_sequence
+                )
+                and self.is_running
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False, None
+                self.frame_lock.wait(timeout=remaining)
+
+            if self.latest_frame is None:
+                return False, None
+            self.last_read_sequence = self.latest_frame_sequence
+            return True, self.latest_frame.copy()
+
+    def _reader_loop(self):
+        """Continuously drain TCP data and keep only the newest decoded frame."""
+        while self.is_running and self.sock is not None:
+            try:
+                self._receive_available()
+                jpg_data = self._extract_latest_jpeg()
+                if jpg_data is None:
+                    continue
+
                 img_array = np.frombuffer(jpg_data, dtype=np.uint8)
                 frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                
-                if frame is not None:
-                    return True, frame
-                continue
-            
-            # Receive more data
-            try:
-                packet = self.sock.recv(4096)
+                if frame is None:
+                    continue
+
+                with self.frame_lock:
+                    self.latest_frame = frame
+                    self.latest_frame_sequence += 1
+                    self.frame_lock.notify_all()
+
+                if len(self.buffer) > 2_000_000:
+                    self.buffer = self.buffer[-500_000:]
             except socket.timeout:
-                return False, None
-            
+                continue
+            except OSError:
+                break
+            except Exception as error:
+                logger.warning(f"Camera reader error: {error}")
+                time.sleep(0.05)
+
+        self.is_running = False
+
+    def _receive_available(self):
+        """Read pending TCP bytes, then drain bytes already waiting locally."""
+        packet = self.sock.recv(65536)
+        if not packet:
+            raise OSError("Camera stream closed")
+        self.buffer.extend(packet)
+
+        while True:
+            readable, _, _ = select.select([self.sock], [], [], 0)
+            if not readable:
+                break
+            packet = self.sock.recv(65536)
             if not packet:
-                return False, None
-            
+                raise OSError("Camera stream closed")
             self.buffer.extend(packet)
-            
-            # Prevent memory overflow
-            if len(self.buffer) > 2_000_000:
-                self.buffer = self.buffer[-500_000:]
+
+    def _extract_latest_jpeg(self):
+        """Return the newest complete JPEG and discard older buffered frames."""
+        end = self.buffer.rfind(b'\xff\xd9')
+        if end == -1:
+            return None
+
+        start = self.buffer.rfind(b'\xff\xd8', 0, end)
+        if start == -1:
+            del self.buffer[:end + 2]
+            return None
+
+        jpg_data = bytes(self.buffer[start:end + 2])
+        del self.buffer[:end + 2]
+        return jpg_data
     
     def release(self):
         """Close TCP connection (client mode)."""
         self.is_running = False
+        with self.frame_lock:
+            self.frame_lock.notify_all()
         if self.sock is not None:
             try:
                 self.sock.close()

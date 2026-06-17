@@ -1,7 +1,7 @@
 import sys
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QStackedWidget, QLabel, QPushButton
+    QStackedWidget, QLabel, QPushButton, QScrollArea, QFrame, QSizePolicy
 )
 from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, QParallelAnimationGroup
 from PySide6.QtGui import QPixmap
@@ -26,6 +26,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("Workshop Delivery Robot")
         self.resize(1400, 820)
+        self.setMinimumSize(900, 560)
 
         self.bg_original = None
         self.current_user_type = None  # "user" or "manager"
@@ -61,6 +62,8 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(self.topbar)
 
         body = QWidget()
+        body.setMinimumSize(0, 0)
+        body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         body_layout = QHBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
@@ -68,6 +71,8 @@ class MainWindow(QMainWindow):
         self.sidebar = Sidebar()
         self.pages = QStackedWidget()
         self.pages.setObjectName("pagesArea")
+        self.pages.setMinimumSize(0, 0)
+        self.pages.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Create all pages
         self.dashboard_page = DashboardPage()
@@ -87,7 +92,49 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self.sidebar)
         body_layout.addWidget(self.pages, 1)
 
-        content_layout.addWidget(body, 1)
+        body_scroll = QScrollArea()
+        body_scroll.setWidgetResizable(True)
+        body_scroll.setFrameShape(QFrame.NoFrame)
+        body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        body_scroll.setMinimumSize(0, 0)
+        body_scroll.setStyleSheet(
+            """
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: rgba(7, 18, 32, 160);
+                width: 12px;
+                margin: 0;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(90, 185, 255, 120);
+                min-height: 30px;
+                border-radius: 6px;
+            }
+            QScrollBar:horizontal {
+                background: rgba(7, 18, 32, 160);
+                height: 12px;
+                margin: 0;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal {
+                background: rgba(90, 185, 255, 120);
+                min-width: 30px;
+                border-radius: 6px;
+            }
+            QScrollBar::add-line,
+            QScrollBar::sub-line {
+                width: 0;
+                height: 0;
+            }
+            """
+        )
+        body_scroll.setWidget(body)
+        content_layout.addWidget(body_scroll, 1)
         
         # Add main content to stack
         self.main_stack.addWidget(self.login_page)

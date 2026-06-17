@@ -15,18 +15,21 @@ IMAGE_URL = f"{BRIDGE_URL}/api/vision/debug-image.jpg"
 STATUS_URL = f"{BRIDGE_URL}/api/status"
 WINDOW_NAME = "Face Recognition System - Pi RAW TCP Camera"
 PLACEHOLDER_SIZE = (720, 720, 3)
+IMAGE_TIMEOUT_S = 3.0
+STATUS_TIMEOUT_S = 1.0
+PREVIEW_PERIOD_S = 0.08
 
 
 def fetch_image():
     url = f"{IMAGE_URL}?t={time.time():.3f}"
-    with urlopen(url, timeout=1.0) as response:
+    with urlopen(url, timeout=IMAGE_TIMEOUT_S) as response:
         data = response.read()
     image_array = np.frombuffer(data, dtype=np.uint8)
     return cv2.imdecode(image_array, cv2.IMREAD_COLOR)
 
 
 def fetch_status():
-    with urlopen(STATUS_URL, timeout=1.0) as response:
+    with urlopen(STATUS_URL, timeout=STATUS_TIMEOUT_S) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -85,10 +88,14 @@ def main():
     print(f"Waiting for vision preview at {IMAGE_URL}")
     last_status = None
     last_status_fetch_s = 0.0
+    last_frame = None
+    last_frame_s = 0.0
     while True:
         try:
             frame = fetch_image()
             if frame is not None:
+                last_frame = frame
+                last_frame_s = time.monotonic()
                 cv2.imshow(WINDOW_NAME, frame)
             else:
                 time.sleep(0.1)
@@ -100,17 +107,31 @@ def main():
                     last_status = fetch_status()
                 except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
                     last_status = None
-            frame = make_waiting_frame(
-                f"Waiting for camera/ROS image: {type(error).__name__}",
-                last_status,
-            )
+            if last_frame is not None and now - last_frame_s < 5.0:
+                frame = last_frame.copy()
+                cv2.putText(
+                    frame,
+                    f"Preview waiting for next frame: {type(error).__name__}",
+                    (20, frame.shape[0] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (0, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+            else:
+                frame = make_waiting_frame(
+                    f"Waiting for camera/ROS image: {type(error).__name__}",
+                    last_status,
+                )
             cv2.imshow(WINDOW_NAME, frame)
-            time.sleep(0.25)
+            time.sleep(0.15)
         except KeyboardInterrupt:
             break
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
+        time.sleep(PREVIEW_PERIOD_S)
 
     cv2.destroyAllWindows()
 
