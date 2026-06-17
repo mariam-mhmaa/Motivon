@@ -8,7 +8,7 @@ Before running this file, start the camera server on the Raspberry Pi:
     python camera.py server
 
 Or run the equivalent command:
-    rpicam-vid -t 0 -n --width 240 --height 180 --framerate 8 --codec mjpeg -o - | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -f mjpeg -i pipe:0 -c:v mjpeg -q:v 8 -f mjpeg "tcp://0.0.0.0:8888?listen=1"
+    rpicam-vid -t 0 -n --width 640 --height 480 --framerate 15 --codec mjpeg --quality 95 --sharpness 2.0 --contrast 1.1 --exposure sport --denoise cdn_off -o - | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -f mjpeg -i pipe:0 -c:v copy -f mjpeg "tcp://0.0.0.0:8888?listen=1"
 
 This sends MJPEG-encoded frames over TCP with reliable frame parsing.
 """
@@ -28,13 +28,16 @@ from camera import get_client_camera
 # =========================
 PI_CAMERA_HOST = "192.168.1.111"  # Raspberry Pi IP address
 PI_CAMERA_PORT = 8888
-CAMERA_WIDTH = 240
-CAMERA_HEIGHT = 180
-CAMERA_FRAMERATE = 8
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+CAMERA_FRAMERATE = 15
 
 PROCESS_EVERY_N_FRAMES = 2  # 2 = process every second frame, reducing recognition lag.
-DISPLAY_WIDTH = 640         # Resize only for laptop display.
+DISPLAY_WIDTH = 640         # Keep the 4:3 camera aspect ratio.
 DISPLAY_HEIGHT = 480
+MAX_STORED_DETECTIONS = 2000
+DETECTION_WIDTH = 640
+BLUR_WARNING_THRESHOLD = 45.0
 
 
 def compute_lbp_histogram(gray):
@@ -64,8 +67,6 @@ def compute_lbp_histogram(gray):
             features.extend(hist)
 
     return np.array(features, dtype=np.float32)
-
-
 
 
 class FaceRecognitionSystem:
@@ -260,6 +261,8 @@ class FaceRecognitionSystem:
         }
 
         self.published_detections.append(message)
+        if len(self.published_detections) > MAX_STORED_DETECTIONS:
+            del self.published_detections[:-MAX_STORED_DETECTIONS]
         self.processing_stats["total_detections_published"] += 1
         if is_unknown:
             self.processing_stats["total_unknowns_detected"] += 1
@@ -420,7 +423,31 @@ class FaceRecognitionSystem:
         Returns: person_name, confidence, face_bbox, is_unknown, margin
         """
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(35, 35))
+        detection_scale = min(1.0, DETECTION_WIDTH / gray.shape[1])
+        if detection_scale < 1.0:
+            detection_gray = cv2.resize(
+                gray,
+                None,
+                fx=detection_scale,
+                fy=detection_scale,
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            detection_gray = gray
+
+        detected_faces = self.face_cascade.detectMultiScale(
+            detection_gray,
+            1.1,
+            5,
+            minSize=(35, 35),
+        )
+        if detection_scale < 1.0:
+            faces = [
+                tuple(int(round(value / detection_scale)) for value in face)
+                for face in detected_faces
+            ]
+        else:
+            faces = detected_faces
 
         if len(faces) == 0:
             return None, 0.0, None, True, 0.0
@@ -626,8 +653,11 @@ class FaceRecognitionSystem:
         """Apply hysteresis to avoid rapid identity flips across nearby frames."""
         if person_name is None:
             self.unknown_streak = 0
+            self.locked_identity = None
             self.pending_identity = None
             self.pending_count = 0
+            self.switch_candidate = None
+            self.switch_count = 0
             return None, 0.0, True
 
         if is_unknown:
@@ -753,11 +783,16 @@ class FaceRecognitionSystem:
         raw_is_unknown,
         is_unknown,
         stream_mode,
+        sharpness_score,
     ):
         """Draw runtime information overlay."""
         info_text = [
             f"Frame: {frame_count}",
             f"Camera: Raspberry Pi RAW TCP stream ({stream_mode})",
+            (
+                f"Sharpness: {sharpness_score:.0f} "
+                f"({'BLURRY - adjust lens/light' if sharpness_score < BLUR_WARNING_THRESHOLD else 'OK'})"
+            ),
             f"Smoothing: {'ON' if smoothing_enabled else 'OFF'}",
             f"Process every: {PROCESS_EVERY_N_FRAMES} frame(s)",
             f"Threshold: {self.confidence_threshold:.2f}",
@@ -832,7 +867,8 @@ class FaceRecognitionSystem:
         last_raw_person_name = None
         last_raw_confidence = 0.0
         last_raw_is_unknown = True
-        stream_mode = f"{CAMERA_WIDTH}x{CAMERA_HEIGHT} @ {CAMERA_FRAMERATE} fps MJPEG"
+        stream_mode = "waiting for first decoded frame"
+        reported_stream_shape = None
 
         try:
             while True:
@@ -844,10 +880,48 @@ class FaceRecognitionSystem:
 
                 frame_count += 1
                 self.processing_stats["total_frames_processed"] = frame_count
+                actual_height, actual_width = frame.shape[:2]
+                actual_stream_shape = (actual_width, actual_height)
+                focus_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                focus_scale = min(1.0, 320 / actual_width)
+                if focus_scale < 1.0:
+                    focus_gray = cv2.resize(
+                        focus_gray,
+                        None,
+                        fx=focus_scale,
+                        fy=focus_scale,
+                        interpolation=cv2.INTER_AREA,
+                    )
+                sharpness_score = float(
+                    cv2.Laplacian(focus_gray, cv2.CV_64F).var()
+                )
+                stream_mode = (
+                    f"decoded {actual_width}x{actual_height} "
+                    f"(server target {CAMERA_WIDTH}x{CAMERA_HEIGHT} @ {CAMERA_FRAMERATE} fps)"
+                )
+                if actual_stream_shape != reported_stream_shape:
+                    print(f"Decoded camera resolution: {actual_width}x{actual_height}")
+                    if actual_width < CAMERA_WIDTH or actual_height < CAMERA_HEIGHT:
+                        print(
+                            "WARNING: The Pi is still sending a lower-resolution stream. "
+                            f"Received {actual_width}x{actual_height}, expected "
+                            f"{CAMERA_WIDTH}x{CAMERA_HEIGHT}. Stop the old Pi server "
+                            "and start the updated camera.py on the Raspberry Pi."
+                        )
+                    reported_stream_shape = actual_stream_shape
 
                 # Resize only for display readability. Recognition still works on the received frame.
                 if DISPLAY_WIDTH and DISPLAY_HEIGHT:
-                    display_frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+                    interpolation = (
+                        cv2.INTER_AREA
+                        if actual_width > DISPLAY_WIDTH or actual_height > DISPLAY_HEIGHT
+                        else cv2.INTER_LINEAR
+                    )
+                    display_frame = cv2.resize(
+                        frame,
+                        (DISPLAY_WIDTH, DISPLAY_HEIGHT),
+                        interpolation=interpolation,
+                    )
                     scale_x = DISPLAY_WIDTH / frame.shape[1]
                     scale_y = DISPLAY_HEIGHT / frame.shape[0]
                 else:
@@ -937,7 +1011,30 @@ class FaceRecognitionSystem:
                     last_raw_is_unknown,
                     last_is_unknown,
                     stream_mode,
+                    sharpness_score,
                 )
+
+                if actual_width < CAMERA_WIDTH or actual_height < CAMERA_HEIGHT:
+                    warning = (
+                        f"PI SOURCE IS {actual_width}x{actual_height} - "
+                        f"RESTART PI SERVER AT {CAMERA_WIDTH}x{CAMERA_HEIGHT}"
+                    )
+                    cv2.rectangle(
+                        display_frame,
+                        (0, DISPLAY_HEIGHT - 42),
+                        (DISPLAY_WIDTH, DISPLAY_HEIGHT),
+                        (0, 0, 180),
+                        -1,
+                    )
+                    cv2.putText(
+                        display_frame,
+                        warning,
+                        (10, DISPLAY_HEIGHT - 14),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.58,
+                        (255, 255, 255),
+                        2,
+                    )
 
                 cv2.imshow("Face Recognition System - Pi RAW TCP Camera", display_frame)
 

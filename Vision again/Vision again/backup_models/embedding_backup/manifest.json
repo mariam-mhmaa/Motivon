@@ -1,0 +1,9 @@
+{
+  "name": "embedding_backup_model",
+  "status": "ready_to_train",
+  "active_in_runtime": false,
+  "intended_artifact": "artifacts/embedding_backup_model.pkl",
+  "trainer": "train_embedding_backup_model.py",
+  "inference_adapter": "backup_embedding_inference.py",
+  "description": "Backup InsightFace embedding recognizer isolated from the current LBPH live camera pipeline."
+}

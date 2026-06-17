@@ -22,6 +22,7 @@ import numpy as np
 import cv2
 import threading
 import time
+import select
 from pathlib import Path
 import logging
 
@@ -43,9 +44,9 @@ class PiCamera:
         mode='client',
         host='192.168.1.200',
         port=8888,
-        width=240,
-        height=180,
-        framerate=8,
+        width=640,
+        height=480,
+        framerate=15,
         codec='mjpeg'
     ):
         """
@@ -98,7 +99,7 @@ class PiCamera:
     
     def read(self):
         """
-        Read next frame from TCP stream (client mode).
+        Read the newest available frame from the TCP stream.
         
         Returns:
             (success: bool, frame: ndarray or None)
@@ -109,38 +110,42 @@ class PiCamera:
         if not self.is_running or self.sock is None:
             return False, None
         
-        while True:
-            # Look for JPEG markers (MJPEG format)
-            start = self.buffer.find(b'\xff\xd8')  # JPEG start
-            end = self.buffer.find(b'\xff\xd9')    # JPEG end
-            
-            if start != -1 and end != -1 and end > start:
-                # Extract JPEG data
-                jpg_data = bytes(self.buffer[start:end + 2])
-                del self.buffer[:end + 2]
-                
-                # Decode frame
-                img_array = np.frombuffer(jpg_data, dtype=np.uint8)
-                frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                
-                if frame is not None:
-                    return True, frame
-                continue
-            
-            # Receive more data
+        while self.buffer.rfind(b'\xff\xd9') == -1:
             try:
-                packet = self.sock.recv(4096)
+                packet = self.sock.recv(65536)
             except socket.timeout:
                 return False, None
-            
+
             if not packet:
                 return False, None
-            
+
             self.buffer.extend(packet)
-            
-            # Prevent memory overflow
-            if len(self.buffer) > 2_000_000:
-                self.buffer = self.buffer[-500_000:]
+
+        # Drain bytes already waiting in the socket. Recognition can be slower
+        # than the camera, so returning the oldest buffered JPEG creates
+        # increasing delay. Keeping only the latest complete JPEG stays live.
+        while select.select([self.sock], [], [], 0)[0]:
+            try:
+                packet = self.sock.recv(65536)
+            except (BlockingIOError, socket.timeout):
+                break
+            if not packet:
+                self.is_running = False
+                break
+            self.buffer.extend(packet)
+
+        end = self.buffer.rfind(b'\xff\xd9')
+        start = self.buffer.rfind(b'\xff\xd8', 0, end)
+        if start == -1:
+            del self.buffer[:end + 2]
+            return False, None
+
+        jpg_data = bytes(self.buffer[start:end + 2])
+        del self.buffer[:end + 2]
+
+        img_array = np.frombuffer(jpg_data, dtype=np.uint8)
+        frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        return frame is not None, frame
     
     def release(self):
         """Close TCP connection (client mode)."""
@@ -182,6 +187,11 @@ class PiCamera:
             '--height', str(self.height),
             '--framerate', str(self.framerate),
             '--codec', self.codec,
+            '--quality', '95',
+            '--sharpness', '2.0',
+            '--contrast', '1.1',
+            '--exposure', 'sport',
+            '--denoise', 'cdn_off',
             '-o', '-'            # Output to stdout
         ]
         
@@ -191,11 +201,10 @@ class PiCamera:
             '-loglevel', 'warning',
             '-fflags', 'nobuffer',
             '-flags', 'low_delay',
-            '-f', self.codec,    # Input format matches rpicam output
-            '-i', 'pipe:0',      # Read from stdin
-            '-c:v', 'mjpeg',     # Output MJPEG for reliable parsing
-            '-q:v', '8',         # Quality
-            '-f', 'mjpeg',       # MJPEG format
+            '-f', self.codec,
+            '-i', 'pipe:0',
+            '-c:v', 'copy',
+            '-f', 'mjpeg',
             f'tcp://{self.host}:{self.port}?listen=1'
         ]
         
@@ -267,7 +276,7 @@ class PiCamera:
 # Quick utility functions for easy use
 # =====================================================================
 
-def get_client_camera(host='192.168.1.200', port=8888, width=240, height=180, framerate=8):
+def get_client_camera(host='192.168.1.200', port=8888, width=640, height=480, framerate=15):
     """Create a client camera that connects to remote Pi camera."""
     return PiCamera(
         mode='client',
@@ -279,7 +288,7 @@ def get_client_camera(host='192.168.1.200', port=8888, width=240, height=180, fr
     )
 
 
-def get_server_camera(host='0.0.0.0', port=8888, width=240, height=180, framerate=8, codec='mjpeg'):
+def get_server_camera(host='0.0.0.0', port=8888, width=640, height=480, framerate=15, codec='mjpeg'):
     """Create a server camera (for running on Raspberry Pi)."""
     return PiCamera(
         mode='server',
@@ -301,7 +310,7 @@ if __name__ == '__main__':
     
     if len(sys.argv) > 1 and sys.argv[1] == 'server':
         # Run on Raspberry Pi
-        camera = get_server_camera(host='0.0.0.0', port=8888, width=240, height=180, framerate=8)
+        camera = get_server_camera(host='0.0.0.0', port=8888, width=640, height=480, framerate=15)
         camera.start_server()
         
         try:
