@@ -63,6 +63,7 @@ class MissionManagerNode(Node):
         self.service_retry_count = int(
             self.get_parameter("service_retry_count").value
         )
+        self.use_vision = bool(self.get_parameter("use_vision").value)
         self.vision_action_name = str(
             self.get_parameter("vision_action_name").value
         )
@@ -225,6 +226,7 @@ class MissionManagerNode(Node):
             "navigation_server_timeout_s": 5.0,
             "navigation_goal_timeout_s": 180.0,
             "service_retry_count": 3,
+            "use_vision": True,
             "vision_action_name": "/vision/verify_identity",
             "vision_server_timeout_s": 5.0,
             "vision_attempt_timeout_s": 8.0,
@@ -342,11 +344,21 @@ class MissionManagerNode(Node):
         return response
 
     def confirm_manager_verified_callback(self, _request, response):
-        response.success = False
-        response.message = (
-            "Manager identity is verified automatically by /vision/verify_identity."
+        if self.use_vision:
+            response.success = False
+            response.message = (
+                "Manager identity is verified automatically by /vision/verify_identity."
+            )
+            return response
+        result = self._confirm(
+            response,
+            "MANAGER_VERIFYING",
+            self.manager_verified_event,
+            "Manager verification confirmed.",
         )
-        return response
+        if result.success:
+            self._publish_event("VISION_VERIFIED", message=result.message)
+        return result
 
     def confirm_manager_loaded_callback(self, _request, response):
         return self._confirm(
@@ -357,11 +369,21 @@ class MissionManagerNode(Node):
         )
 
     def confirm_user_verified_callback(self, _request, response):
-        response.success = False
-        response.message = (
-            "User identity is verified automatically by /vision/verify_identity."
+        if self.use_vision:
+            response.success = False
+            response.message = (
+                "User identity is verified automatically by /vision/verify_identity."
+            )
+            return response
+        result = self._confirm(
+            response,
+            "USER_VERIFYING",
+            self.user_verified_event,
+            "User verification confirmed.",
         )
-        return response
+        if result.success:
+            self._publish_event("VISION_VERIFIED", message=result.message)
+        return result
 
     def confirm_user_received_callback(self, _request, response):
         return self._confirm(
@@ -407,14 +429,21 @@ class MissionManagerNode(Node):
         try:
             self._set_state(
                 "MANAGER_VERIFYING",
-                f"Verifying manager identity ({self.manager_identity}).",
+                (
+                    f"Verifying manager identity ({self.manager_identity})."
+                    if self.use_vision
+                    else "Waiting for manager verification."
+                ),
             )
-            if not self._verify_identity_with_retries(
-                self.manager_identity,
-                "HOME_LOADING",
-                "MANAGER",
-                abort_on_failure=True,
-            ):
+            if self.use_vision:
+                if not self._verify_identity_with_retries(
+                    self.manager_identity,
+                    "HOME_LOADING",
+                    "MANAGER",
+                    abort_on_failure=True,
+                ):
+                    return
+            elif not self._wait_for_event(self.manager_verified_event):
                 return
 
             self._set_state("OPENING_LID_FOR_LOADING", "Opening lid for loading.")
@@ -504,27 +533,35 @@ class MissionManagerNode(Node):
                 f"Handling {request.request_id} at {station}.",
             )
             self.user_received_event.clear()
+            self.user_verified_event.clear()
 
             self._set_state(
                 "USER_VERIFYING",
-                f"Verifying {request.user} for {request.request_id}.",
+                (
+                    f"Verifying {request.user} for {request.request_id}."
+                    if self.use_vision
+                    else f"Waiting for user verification for {request.request_id}."
+                ),
             )
-            if not self._verify_identity_with_retries(
-                request.user,
-                "STATION_DELIVERY",
-                request.request_id,
-                abort_on_failure=False,
-            ):
-                self._publish_event(
-                    "REQUEST_SKIPPED_UNVERIFIED",
-                    request,
-                    (
-                        f"{request.request_id} skipped because "
-                        f"{request.user} was not verified."
-                    ),
-                )
-                self.active_request = None
-                continue
+            if self.use_vision:
+                if not self._verify_identity_with_retries(
+                    request.user,
+                    "STATION_DELIVERY",
+                    request.request_id,
+                    abort_on_failure=False,
+                ):
+                    self._publish_event(
+                        "REQUEST_SKIPPED_UNVERIFIED",
+                        request,
+                        (
+                            f"{request.request_id} skipped because "
+                            f"{request.user} was not verified."
+                        ),
+                    )
+                    self.active_request = None
+                    continue
+            elif not self._wait_for_event(self.user_verified_event):
+                return False
 
             self._set_state(
                 "OPENING_LID_FOR_USER",
@@ -1003,11 +1040,15 @@ class MissionManagerNode(Node):
                 status.active_item = self.active_request.item
             status.completed_count = len(self.completed_request_ids)
             status.total_count = len(self.requests)
-            status.can_confirm_manager_verified = False
+            status.can_confirm_manager_verified = (
+                not self.use_vision and self.state == "MANAGER_VERIFYING"
+            )
             status.can_confirm_manager_loaded = (
                 self.state == "WAITING_FOR_MANAGER_LOAD"
             )
-            status.can_confirm_user_verified = False
+            status.can_confirm_user_verified = (
+                not self.use_vision and self.state == "USER_VERIFYING"
+            )
             status.can_confirm_user_received = (
                 self.state == "WAITING_FOR_USER_RECEIPT"
             )
