@@ -15,6 +15,14 @@ def test_mission_manager_exposes_agreed_services():
     assert '"/mission/confirm_user_received"' in source
 
 
+def test_mission_manager_uses_vision_action_for_identity():
+    source = (ROOT / "motivon_mission" / "mission_manager_node.py").read_text()
+
+    assert '"/vision/verify_identity"' in source
+    assert "VerifyIdentity" in source
+    assert "USER_VERIFYING_PLACEHOLDER" not in source
+
+
 def test_mission_manager_uses_fixed_route_targets():
     source = (ROOT / "motivon_mission" / "mission_manager_node.py").read_text()
 

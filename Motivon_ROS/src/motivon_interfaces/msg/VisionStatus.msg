@@ -1,0 +1,11 @@
+builtin_interfaces/Time stamp
+string state
+string detail
+bool camera_ok
+bool model_ok
+bool busy
+string active_context
+string expected_identity
+string last_identity
+float32 last_confidence
+bool face_detected

@@ -31,6 +31,9 @@ def generate_launch_description():
     mission_params = PathJoinSubstitution(
         [FindPackageShare("motivon_mission"), "config", "mission_params.yaml"]
     )
+    vision_params = PathJoinSubstitution(
+        [FindPackageShare("motivon_vision"), "config", "vision_params.yaml"]
+    )
     bridge_params = PathJoinSubstitution(
         [FindPackageShare("motivon_gui_bridge"), "config", "gui_bridge_params.yaml"]
     )
@@ -94,6 +97,15 @@ def generate_launch_description():
                 name="lid_control_node",
                 output="screen",
                 parameters=[lid_params],
+                respawn=True,
+                respawn_delay=2.0,
+            ),
+            Node(
+                package="motivon_vision",
+                executable="vision_node",
+                name="vision_node",
+                output="screen",
+                parameters=[vision_params],
                 respawn=True,
                 respawn_delay=2.0,
             ),

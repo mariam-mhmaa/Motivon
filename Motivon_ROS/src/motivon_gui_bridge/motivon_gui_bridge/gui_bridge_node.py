@@ -9,7 +9,14 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import rclpy
 from geometry_msgs.msg import Twist
-from motivon_interfaces.msg import MissionEvent, MissionStatus, NavigationStatus, ObstacleState
+from motivon_interfaces.msg import (
+    MissionEvent,
+    MissionStatus,
+    NavigationStatus,
+    ObstacleState,
+    VisionDetection,
+    VisionStatus,
+)
 from motivon_interfaces.srv import StartMission
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -43,6 +50,8 @@ class GuiBridgeNode(Node):
             "mission": {},
             "navigation": {},
             "obstacle": {},
+            "vision": {},
+            "vision_detection": {},
             "cmd_vel_gate": "",
             "lid": "",
             "base_heartbeat": None,
@@ -110,6 +119,20 @@ class GuiBridgeNode(Node):
             ObstacleState,
             "/obstacle/state",
             self.on_obstacle_state,
+            10,
+            callback_group=self.callback_group,
+        )
+        self.create_subscription(
+            VisionStatus,
+            "/vision/status",
+            self.on_vision_status,
+            10,
+            callback_group=self.callback_group,
+        )
+        self.create_subscription(
+            VisionDetection,
+            "/vision/detection",
+            self.on_vision_detection,
             10,
             callback_group=self.callback_group,
         )
@@ -376,6 +399,41 @@ class GuiBridgeNode(Node):
                 "blocked": msg.blocked,
                 "static_obstacle": msg.static_obstacle,
                 "blocked_direction": msg.blocked_direction,
+                "detail": msg.detail,
+            }
+
+    def on_vision_status(self, msg: VisionStatus) -> None:
+        with self.lock:
+            self.status_cache["vision"] = {
+                "state": msg.state,
+                "detail": msg.detail,
+                "camera_ok": msg.camera_ok,
+                "model_ok": msg.model_ok,
+                "busy": msg.busy,
+                "active_context": msg.active_context,
+                "expected_identity": msg.expected_identity,
+                "last_identity": msg.last_identity,
+                "last_confidence": msg.last_confidence,
+                "face_detected": msg.face_detected,
+            }
+
+    def on_vision_detection(self, msg: VisionDetection) -> None:
+        with self.lock:
+            self.status_cache["vision_detection"] = {
+                "frame_id": msg.frame_id,
+                "face_detected": msg.face_detected,
+                "person_name": msg.person_name,
+                "is_unknown": msg.is_unknown,
+                "confidence": msg.confidence,
+                "threshold": msg.threshold,
+                "bbox": {
+                    "x1": msg.bbox_x1,
+                    "y1": msg.bbox_y1,
+                    "x2": msg.bbox_x2,
+                    "y2": msg.bbox_y2,
+                    "width": msg.bbox_width,
+                    "height": msg.bbox_height,
+                },
                 "detail": msg.detail,
             }
 

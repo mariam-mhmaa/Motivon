@@ -10,3 +10,17 @@ mission_manager_node:
     navigation_server_timeout_s: 5.0
     navigation_goal_timeout_s: 180.0
     service_retry_count: 3
+    vision_action_name: /vision/verify_identity
+    vision_server_timeout_s: 5.0
+    vision_attempt_timeout_s: 8.0
+    vision_primary_attempts: 3
+    vision_secondary_attempts: 3
+    vision_retry_pause_s: 2.0
+    vision_required_success_frames: 3
+    vision_min_confidence: 0.20
+    manager_identity: nour
+    identity_map_entries:
+      - nour=Nour
+      - ainour=Ainour
+      - mariam=Mariam
+      - zeina=Zeina

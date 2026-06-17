@@ -13,7 +13,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
-from motivon_interfaces.action import NavigateToTarget
+from motivon_interfaces.action import NavigateToTarget, VerifyIdentity
 from motivon_interfaces.msg import MissionEvent, MissionStatus
 from motivon_interfaces.srv import StartMission
 
@@ -63,6 +63,34 @@ class MissionManagerNode(Node):
         self.service_retry_count = int(
             self.get_parameter("service_retry_count").value
         )
+        self.vision_action_name = str(
+            self.get_parameter("vision_action_name").value
+        )
+        self.vision_server_timeout_s = float(
+            self.get_parameter("vision_server_timeout_s").value
+        )
+        self.vision_attempt_timeout_s = float(
+            self.get_parameter("vision_attempt_timeout_s").value
+        )
+        self.vision_primary_attempts = int(
+            self.get_parameter("vision_primary_attempts").value
+        )
+        self.vision_secondary_attempts = int(
+            self.get_parameter("vision_secondary_attempts").value
+        )
+        self.vision_retry_pause_s = float(
+            self.get_parameter("vision_retry_pause_s").value
+        )
+        self.vision_required_success_frames = int(
+            self.get_parameter("vision_required_success_frames").value
+        )
+        self.vision_min_confidence = float(
+            self.get_parameter("vision_min_confidence").value
+        )
+        self.identity_map = self._load_identity_map()
+        self.manager_identity = self._map_identity(
+            str(self.get_parameter("manager_identity").value)
+        )
 
         self.status_pub = self.create_publisher(
             MissionStatus, "/mission/status", 10
@@ -78,6 +106,12 @@ class MissionManagerNode(Node):
             self,
             NavigateToTarget,
             "/navigation/navigate_to_target",
+            callback_group=self.callback_group,
+        )
+        self.verify_identity_client = ActionClient(
+            self,
+            VerifyIdentity,
+            self.vision_action_name,
             callback_group=self.callback_group,
         )
         self.lid_open_client = self.create_client(
@@ -169,6 +203,7 @@ class MissionManagerNode(Node):
         self.latest_lid_status = ""
         self.worker: Optional[threading.Thread] = None
         self.active_goal_handle = None
+        self.active_vision_goal_handle = None
 
         self.manager_verified_event = threading.Event()
         self.manager_loaded_event = threading.Event()
@@ -190,9 +225,48 @@ class MissionManagerNode(Node):
             "navigation_server_timeout_s": 5.0,
             "navigation_goal_timeout_s": 180.0,
             "service_retry_count": 3,
+            "vision_action_name": "/vision/verify_identity",
+            "vision_server_timeout_s": 5.0,
+            "vision_attempt_timeout_s": 8.0,
+            "vision_primary_attempts": 3,
+            "vision_secondary_attempts": 3,
+            "vision_retry_pause_s": 2.0,
+            "vision_required_success_frames": 3,
+            "vision_min_confidence": 0.20,
+            "manager_identity": "nour",
+            "identity_map_entries": [
+                "nour=Nour",
+                "ainour=Ainour",
+                "mariam=Mariam",
+                "zeina=Zeina",
+            ],
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
+
+    def _load_identity_map(self) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        entries = self.get_parameter("identity_map_entries").value
+        for entry in entries:
+            text = str(entry)
+            if "=" in text:
+                key, value = text.split("=", 1)
+            elif ":" in text:
+                key, value = text.split(":", 1)
+            else:
+                continue
+            key = key.strip().lower()
+            value = value.strip()
+            if key and value:
+                mapping[key] = value
+                mapping[value.lower()] = value
+        return mapping
+
+    def _map_identity(self, identity: str) -> str:
+        text = str(identity).strip()
+        if not text:
+            return ""
+        return self.identity_map.get(text.lower(), text)
 
     def start_callback(self, request, response):
         validation = self._validate_start_request(request)
@@ -268,12 +342,11 @@ class MissionManagerNode(Node):
         return response
 
     def confirm_manager_verified_callback(self, _request, response):
-        return self._confirm(
-            response,
-            "MANAGER_VERIFYING",
-            self.manager_verified_event,
-            "Manager verification confirmed.",
+        response.success = False
+        response.message = (
+            "Manager identity is verified automatically by /vision/verify_identity."
         )
+        return response
 
     def confirm_manager_loaded_callback(self, _request, response):
         return self._confirm(
@@ -284,12 +357,11 @@ class MissionManagerNode(Node):
         )
 
     def confirm_user_verified_callback(self, _request, response):
-        return self._confirm(
-            response,
-            "USER_VERIFYING_PLACEHOLDER",
-            self.user_verified_event,
-            "User verification confirmed.",
+        response.success = False
+        response.message = (
+            "User identity is verified automatically by /vision/verify_identity."
         )
+        return response
 
     def confirm_user_received_callback(self, _request, response):
         return self._confirm(
@@ -333,8 +405,16 @@ class MissionManagerNode(Node):
 
     def _run_mission(self) -> None:
         try:
-            self._set_state("MANAGER_VERIFYING", "Waiting for manager verification.")
-            if not self._wait_for_event(self.manager_verified_event):
+            self._set_state(
+                "MANAGER_VERIFYING",
+                f"Verifying manager identity ({self.manager_identity}).",
+            )
+            if not self._verify_identity_with_retries(
+                self.manager_identity,
+                "HOME_LOADING",
+                "MANAGER",
+                abort_on_failure=True,
+            ):
                 return
 
             self._set_state("OPENING_LID_FOR_LOADING", "Opening lid for loading.")
@@ -423,15 +503,28 @@ class MissionManagerNode(Node):
                 request,
                 f"Handling {request.request_id} at {station}.",
             )
-            self.user_verified_event.clear()
             self.user_received_event.clear()
 
             self._set_state(
-                "USER_VERIFYING_PLACEHOLDER",
-                f"Waiting for user verification for {request.request_id}.",
+                "USER_VERIFYING",
+                f"Verifying {request.user} for {request.request_id}.",
             )
-            if not self._wait_for_event(self.user_verified_event):
-                return False
+            if not self._verify_identity_with_retries(
+                request.user,
+                "STATION_DELIVERY",
+                request.request_id,
+                abort_on_failure=False,
+            ):
+                self._publish_event(
+                    "REQUEST_SKIPPED_UNVERIFIED",
+                    request,
+                    (
+                        f"{request.request_id} skipped because "
+                        f"{request.user} was not verified."
+                    ),
+                )
+                self.active_request = None
+                continue
 
             self._set_state(
                 "OPENING_LID_FOR_USER",
@@ -550,6 +643,178 @@ class MissionManagerNode(Node):
             time.sleep(0.10)
         return True
 
+    def _verify_identity_with_retries(
+        self,
+        expected_identity: str,
+        context: str,
+        request_id: str,
+        abort_on_failure: bool,
+    ) -> bool:
+        expected = self._map_identity(expected_identity)
+        if not expected:
+            message = "Vision verification requested with an empty identity."
+            if abort_on_failure:
+                self._fault(message)
+            else:
+                self.detail = message
+            return False
+
+        total_attempts = self.vision_primary_attempts + self.vision_secondary_attempts
+        last_failure = "Vision verification did not run."
+
+        for attempt in range(1, total_attempts + 1):
+            if self._should_stop():
+                return False
+            if not self._wait_while_safety_paused():
+                return False
+
+            if attempt == self.vision_primary_attempts + 1:
+                self._set_state(
+                    self.state,
+                    (
+                        f"Vision did not verify {expected}; waiting "
+                        f"{self.vision_retry_pause_s:.1f} s before retry block."
+                    ),
+                )
+                if not self._sleep_interruptible(self.vision_retry_pause_s):
+                    return False
+
+            self.detail = (
+                f"Vision verification attempt {attempt}/{total_attempts} "
+                f"for {expected}."
+            )
+            result = self._send_verify_identity_goal(
+                expected,
+                context,
+                request_id,
+                attempt,
+            )
+            if result is not None and result.verified:
+                self._publish_event(
+                    "VISION_VERIFIED",
+                    message=(
+                        f"{expected} verified as {result.matched_identity} "
+                        f"with confidence {result.confidence:.2f}."
+                    ),
+                )
+                return True
+
+            if result is None:
+                last_failure = "Vision action did not return a result."
+            else:
+                last_failure = result.failure_reason or (
+                    f"Expected {expected}, saw {result.matched_identity}."
+                )
+
+            self._publish_event(
+                "VISION_VERIFY_ATTEMPT_FAILED",
+                message=(
+                    f"Attempt {attempt}/{total_attempts} failed for "
+                    f"{expected}: {last_failure}"
+                ),
+            )
+
+        message = f"Vision could not verify {expected}: {last_failure}"
+        if abort_on_failure:
+            self._fault(message)
+        else:
+            self.detail = message
+        return False
+
+    def _send_verify_identity_goal(
+        self,
+        expected: str,
+        context: str,
+        request_id: str,
+        attempt: int,
+    ):
+        if not self.verify_identity_client.wait_for_server(
+            timeout_sec=self.vision_server_timeout_s
+        ):
+            self.detail = (
+                f"Waiting for {self.vision_action_name} action server."
+            )
+            return None
+
+        goal = VerifyIdentity.Goal()
+        goal.expected_identity = expected
+        goal.context = context
+        goal.request_id = request_id
+        goal.timeout_s = float(self.vision_attempt_timeout_s)
+        goal.required_success_frames = int(self.vision_required_success_frames)
+        goal.min_confidence = float(self.vision_min_confidence)
+
+        send_future = self.verify_identity_client.send_goal_async(
+            goal,
+            feedback_callback=lambda feedback_msg: self._on_vision_feedback(
+                feedback_msg,
+                expected,
+                attempt,
+            ),
+        )
+        if not self._wait_for_future(
+            send_future,
+            self.service_wait_timeout_s,
+            f"send vision goal for {expected}",
+        ):
+            return None
+
+        goal_handle = send_future.result()
+        if goal_handle is None or not goal_handle.accepted:
+            self.detail = f"Vision rejected verification goal for {expected}."
+            return None
+
+        with self.lock:
+            self.active_vision_goal_handle = goal_handle
+
+        result_future = goal_handle.get_result_async()
+        try:
+            if not self._wait_for_vision_result(result_future, expected):
+                return None
+            return result_future.result().result
+        except Exception as error:
+            self.detail = f"Vision result for {expected} failed: {error}."
+            return None
+        finally:
+            with self.lock:
+                self.active_vision_goal_handle = None
+
+    def _on_vision_feedback(self, feedback_msg, expected: str, attempt: int) -> None:
+        feedback = feedback_msg.feedback
+        with self.lock:
+            self.detail = (
+                f"Vision attempt {attempt} for {expected}: {feedback.state}; "
+                f"face={feedback.face_detected}, "
+                f"current={feedback.current_identity}, "
+                f"conf={feedback.current_confidence:.2f}, "
+                f"remaining={feedback.remaining_s:.1f} s."
+            )
+
+    def _wait_for_vision_result(self, result_future, expected: str) -> bool:
+        deadline = time.monotonic() + self.vision_attempt_timeout_s + 3.0
+        while not result_future.done():
+            if self._should_stop():
+                self._cancel_active_vision()
+                return False
+            if self.safety_paused:
+                deadline += 0.10
+            elif time.monotonic() > deadline:
+                self._cancel_active_vision()
+                self.detail = f"Vision verification for {expected} timed out."
+                return False
+            time.sleep(0.05)
+        return True
+
+    def _sleep_interruptible(self, duration_s: float) -> bool:
+        deadline = time.monotonic() + max(0.0, duration_s)
+        while time.monotonic() < deadline:
+            if self._should_stop():
+                return False
+            if not self._wait_while_safety_paused():
+                return False
+            time.sleep(0.05)
+        return True
+
     def _call_lid(self, client, service_name: str) -> bool:
         return self._call_trigger(
             client, service_name, timeout_s=self.lid_motion_timeout_s
@@ -630,6 +895,7 @@ class MissionManagerNode(Node):
             self._set_state_locked("FAULTED" if fault else "ABORTING", message)
             self._clear_confirmation_events(set_all=True)
         self._cancel_active_navigation()
+        self._cancel_active_vision()
         self._call_lid_stop_best_effort()
         self._publish_base_enable(False)
         self._publish_event("MISSION_FAULTED" if fault else "MISSION_CANCELLED", message=message)
@@ -651,6 +917,17 @@ class MissionManagerNode(Node):
             self._wait_for_future(future, 2.0, "cancel navigation")
         except Exception as error:
             self.get_logger().warning(f"Navigation cancel failed: {error}")
+
+    def _cancel_active_vision(self) -> None:
+        with self.lock:
+            goal_handle = self.active_vision_goal_handle
+        if goal_handle is None:
+            return
+        try:
+            future = goal_handle.cancel_goal_async()
+            self._wait_for_future(future, 2.0, "cancel vision verification")
+        except Exception as error:
+            self.get_logger().warning(f"Vision cancel failed: {error}")
 
     def _call_lid_stop_best_effort(self) -> None:
         if not self.lid_stop_client.wait_for_service(timeout_sec=0.2):
@@ -722,15 +999,11 @@ class MissionManagerNode(Node):
                 status.active_item = self.active_request.item
             status.completed_count = len(self.completed_request_ids)
             status.total_count = len(self.requests)
-            status.can_confirm_manager_verified = (
-                self.state == "MANAGER_VERIFYING"
-            )
+            status.can_confirm_manager_verified = False
             status.can_confirm_manager_loaded = (
                 self.state == "WAITING_FOR_MANAGER_LOAD"
             )
-            status.can_confirm_user_verified = (
-                self.state == "USER_VERIFYING_PLACEHOLDER"
-            )
+            status.can_confirm_user_verified = False
             status.can_confirm_user_received = (
                 self.state == "WAITING_FOR_USER_RECEIPT"
             )

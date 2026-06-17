@@ -20,6 +20,31 @@ unchanged outside this directory.
 - `navigation_node`: Executes measured named routes using filtered odometry,
   conservative initial controller limits, stale-localization stopping with
   stable-data recovery, and typed action feedback.
+- `vision_node`: Wraps the existing face recognizer from
+  `Vision again/06_real_time_camera.py` as a ROS action server on
+  `/vision/verify_identity`, plus `/vision/status` and `/vision/detection`
+  topics for GUI/status visibility.
+
+## Vision identity verification
+
+The mission manager uses `motivon_interfaces/action/VerifyIdentity` instead of
+the old manual GUI identity placeholders. Manager verification happens before
+loading at HOME, and user verification happens at each station request before
+the lid opens.
+
+The default identity map is:
+
+```yaml
+nour: Nour
+ainour: Ainour
+mariam: Mariam
+zeina: Zeina
+```
+
+Camera settings live in `motivon_vision/config/vision_params.yaml`. The camera
+TCP port defaults to `8890` to avoid confusion with the micro-ROS UDP port
+`8888`. If the repo layout on the Pi is different, set `vision_project_dir` to
+the folder containing `06_real_time_camera.py`, `camera.py`, and `models/`.
 
 ## Navigation coordinate frame
 
@@ -164,7 +189,7 @@ ros2 launch motivon_bringup base_system.launch.py
 
 The agent listens on UDP port `8888`.
 
-The Raspberry Pi / micro-ROS agent is reserved at `192.168.1.111` on the home
+The Raspberry Pi / micro-ROS agent is reserved at `172.20.10.10` on the home
 network. The ESP32 uses DHCP because it initiates the connection to the agent
 and does not require a fixed address. This avoids conflicts with other clients.
 

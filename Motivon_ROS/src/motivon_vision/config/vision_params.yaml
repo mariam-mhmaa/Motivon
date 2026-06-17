@@ -1,0 +1,31 @@
+vision_node:
+  ros__parameters:
+    # Leave empty to auto-detect the existing "Vision again/Vision again" folder
+    # from the cloned repository. Set an absolute path on the Pi if needed.
+    vision_project_dir: ""
+
+    camera_host: 172.20.10.10
+    camera_port: 8890
+    camera_width: 1280
+    camera_height: 720
+    camera_framerate: 8
+    auto_start_camera_server: false
+
+    process_every_n_frames: 2
+    smoothing_enabled: true
+    confidence_threshold: 0.20
+    margin_threshold: 0.02
+    use_external_calibration: false
+    use_known_detector: false
+
+    default_timeout_s: 8.0
+    default_required_success_frames: 3
+    default_min_confidence: 0.20
+    status_period_s: 0.20
+    reconnect_period_s: 2.0
+
+    identity_map_entries:
+      - nour=Nour
+      - ainour=Ainour
+      - mariam=Mariam
+      - zeina=Zeina

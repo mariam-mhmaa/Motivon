@@ -1,0 +1,14 @@
+builtin_interfaces/Time stamp
+string frame_id
+bool face_detected
+string person_name
+bool is_unknown
+float32 confidence
+float32 threshold
+int32 bbox_x1
+int32 bbox_y1
+int32 bbox_x2
+int32 bbox_y2
+int32 bbox_width
+int32 bbox_height
+string detail

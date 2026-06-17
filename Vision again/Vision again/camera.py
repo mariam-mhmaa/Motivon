@@ -6,11 +6,11 @@ using rpicam-vid and ffmpeg, streaming over TCP with MJPEG format for reliable f
 
 Usage:
     On Raspberry Pi (run once, then leave running):
-        camera = PiCamera(mode='server', port=8888)
+        camera = PiCamera(mode='server', port=8890)
         camera.start_server()
 
     On laptop (consuming frames):
-        camera = PiCamera(mode='client', host='192.168.1.200', port=8888)
+        camera = PiCamera(mode='client', host='172.20.10.10', port=8890)
         camera.open()
         success, frame = camera.read()
         camera.release()
@@ -41,8 +41,8 @@ class PiCamera:
     def __init__(
         self,
         mode='client',
-        host='192.168.1.200',
-        port=8888,
+        host='172.20.10.10',
+        port=8890,
         width=240,
         height=180,
         framerate=8,
@@ -310,7 +310,7 @@ class PiCamera:
 # Quick utility functions for easy use
 # =====================================================================
 
-def get_client_camera(host='192.168.1.200', port=8888, width=1280, height=720, framerate=8):
+def get_client_camera(host='172.20.10.10', port=8890, width=1280, height=720, framerate=8):
     """Create a client camera that connects to remote Pi camera."""
     return PiCamera(
         mode='client',
@@ -322,7 +322,7 @@ def get_client_camera(host='192.168.1.200', port=8888, width=1280, height=720, f
     )
 
 
-def get_server_camera(host='0.0.0.0', port=8888, width=1280, height=720, framerate=8, codec='mjpeg'):
+def get_server_camera(host='0.0.0.0', port=8890, width=1280, height=720, framerate=8, codec='mjpeg'):
     """Create a server camera (for running on Raspberry Pi)."""
     return PiCamera(
         mode='server',
@@ -344,7 +344,7 @@ if __name__ == '__main__':
     
     if len(sys.argv) > 1 and sys.argv[1] == 'server':
         # Run on Raspberry Pi
-        camera = get_server_camera(host='0.0.0.0', port=8888, width=1280, height=720, framerate=8)
+        camera = get_server_camera(host='0.0.0.0', port=8890, width=1280, height=720, framerate=8)
         camera.start_server()
         
         try:
@@ -357,7 +357,7 @@ if __name__ == '__main__':
         print("Example client usage:")
         print()
         print("  from camera import get_client_camera")
-        print("  camera = get_client_camera(host='192.168.1.200', port=8888)")
+        print("  camera = get_client_camera(host='172.20.10.10', port=8890)")
         print("  camera.open()")
         print("  success, frame = camera.read()")
         print("  camera.release()")

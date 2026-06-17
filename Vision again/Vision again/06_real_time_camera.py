@@ -8,7 +8,7 @@ Before running this file, start the camera server on the Raspberry Pi:
     python camera.py server
 
 Or run the equivalent command:
-    rpicam-vid -t 0 -n --width 240 --height 180 --framerate 8 --codec mjpeg -o - | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -f mjpeg -i pipe:0 -c:v mjpeg -q:v 8 -f mjpeg "tcp://0.0.0.0:8888?listen=1"
+    rpicam-vid -t 0 -n --width 1280 --height 720 --framerate 8 --codec mjpeg --quality 95 -o - | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -f mjpeg -i pipe:0 -c:v copy -f mjpeg "tcp://0.0.0.0:8890?listen=1"
 
 This sends MJPEG-encoded frames over TCP with reliable frame parsing.
 """
@@ -26,8 +26,8 @@ from camera import get_client_camera
 # =========================
 # CAMERA CONFIG
 # =========================
-PI_CAMERA_HOST = "192.168.1.111"  # Change to your Raspberry Pi IP address
-PI_CAMERA_PORT = 8888
+PI_CAMERA_HOST = "172.20.10.10"  # Raspberry Pi IP address
+PI_CAMERA_PORT = 8890
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
 CAMERA_FRAMERATE = 8
