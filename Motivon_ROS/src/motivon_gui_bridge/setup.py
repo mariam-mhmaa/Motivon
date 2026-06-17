@@ -1,7 +1,10 @@
+from glob import glob
+import os
+
 from setuptools import find_packages, setup
 
 
-package_name = "motivon_base"
+package_name = "motivon_gui_bridge"
 
 
 setup(
@@ -14,18 +17,21 @@ setup(
             ["resource/" + package_name],
         ),
         ("share/" + package_name, ["package.xml"]),
+        (
+            os.path.join("share", package_name, "config"),
+            glob("config/*.yaml"),
+        ),
     ],
-    install_requires=["setuptools"],
+    install_requires=["setuptools", "fastapi", "uvicorn"],
     zip_safe=True,
     maintainer="Motivon Team",
     maintainer_email="student@example.com",
-    description="Mecanum wheel odometry for the real Motivon delivery robot.",
+    description="HTTP and WebSocket bridge between the Windows GUI and ROS.",
     license="MIT",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "wheel_odometry_node = motivon_base.wheel_odometry_node:main",
-            "base_recovery_node = motivon_base.base_recovery_node:main",
+            "gui_bridge_node = motivon_gui_bridge.gui_bridge_node:main",
         ],
     },
 )

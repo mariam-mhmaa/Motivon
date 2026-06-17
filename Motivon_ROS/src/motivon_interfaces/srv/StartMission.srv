@@ -1,0 +1,7 @@
+string[] request_ids
+string[] users
+string[] items
+string[] stations
+---
+bool success
+string message

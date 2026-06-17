@@ -1,87 +1,225 @@
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableWidget,
-    QTableWidgetItem, QMessageBox, QDialog, QCheckBox, QFrame, QComboBox
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QFont
 
+from api_client import GuiBridgeClient
 from data_model import delivery_system
 
 
 class ManagerDashboardPage(QWidget):
-    """Manager dashboard for managing deliveries"""
-    
+    """Manager dashboard for real robot mission control."""
+
     logout_requested = Signal()
-    
+
     def __init__(self):
         super().__init__()
         self.current_manager = None
-        self.current_delivery_step = None
-        self.vision_simulation_timer = None
-        
-        # Auto-refresh timer for pending requests
-        self.refresh_timer = QTimer()
+        self.active_mission_request_ids = set()
+        self.completed_event_ids = set()
+        self.pending_selected_request_ids = set()
+        self.last_event_key = None
+        self.latest_status = {}
+        self.terminal_reset_pending = False
+
+        self.bridge = GuiBridgeClient(parent=self)
+        self.bridge.status_received.connect(self.on_bridge_status)
+        self.bridge.connection_changed.connect(self.on_bridge_connection)
+        self.bridge.start_status_stream()
+
+        self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh_pending_requests)
-        self.refresh_timer.start(2000)  # Refresh every 2 seconds
-        
+        self.refresh_timer.start(2000)
+
         root = QVBoxLayout(self)
         root.setContentsMargins(30, 30, 30, 30)
-        root.setSpacing(20)
-        
-        # Header
+        root.setSpacing(18)
+
         header_layout = QHBoxLayout()
-        
         title = QLabel("Manager Dashboard")
-        title.setStyleSheet("font-size: 34px; font-weight: 800; color: #F4FBFF;")
+        title.setStyleSheet(
+            "font-size: 34px; font-weight: 800; color: #F4FBFF;"
+        )
         header_layout.addWidget(title)
         header_layout.addStretch()
-        
+
         logout_btn = QPushButton("Logout")
         logout_btn.setMaximumWidth(100)
         logout_btn.setStyleSheet(self.get_button_style("red"))
         logout_btn.clicked.connect(self.logout_requested.emit)
         header_layout.addWidget(logout_btn)
-        
         root.addLayout(header_layout)
-        
+
         subtitle = QLabel("Manage delivery requests and monitor robot operations")
         subtitle.setStyleSheet("font-size: 13px; color: #8FCDF2;")
         root.addWidget(subtitle)
-        
-        # Tab-like sections using a stack-like layout
-        self.main_stack_layout = QVBoxLayout()
-        self.main_stack_layout.setSpacing(20)
-        
-        # Pending Requests Section (initial view)
+
         self.pending_section = self.create_pending_requests_section()
-        # Delivery Control Section (visible during delivery)
         self.delivery_section = self.create_delivery_control_section()
-        
-        self.main_stack_layout.addWidget(self.pending_section)
-        self.main_stack_layout.addWidget(self.delivery_section)
-        
-        # Hide delivery section initially
         self.delivery_section.hide()
-        
-        root.addLayout(self.main_stack_layout)
+
+        root.addWidget(self.pending_section)
+        root.addWidget(self.delivery_section)
         root.addStretch()
-    
+
     def create_pending_requests_section(self):
-        """Create section for viewing pending requests"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setSpacing(15)
-        
-        layout.addWidget(self.create_section_label("📋 Pending Requests"))
-        
-        # Requests table
+        layout.setSpacing(14)
+
+        layout.addWidget(self.create_section_label("Pending Requests"))
+
         self.pending_table = QTableWidget()
         self.pending_table.setColumnCount(6)
-        self.pending_table.setHorizontalHeaderLabels([
-            "Select", "Request ID", "User", "Object", "Target Station", "Created"
-        ])
+        self.pending_table.setHorizontalHeaderLabels(
+            ["Select", "Request ID", "User", "Object", "Target Station", "Created"]
+        )
         self.pending_table.setMinimumHeight(250)
-        self.pending_table.setStyleSheet("""
+        self.pending_table.setStyleSheet(self.get_table_style())
+        self.pending_table.itemChanged.connect(self.on_pending_item_changed)
+        layout.addWidget(self.pending_table)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setMinimumWidth(100)
+        refresh_btn.setStyleSheet(self.get_button_style("blue"))
+        refresh_btn.clicked.connect(self.refresh_pending_requests)
+        button_layout.addWidget(refresh_btn)
+
+        self.start_delivery_btn = QPushButton("Open Lid")
+        self.start_delivery_btn.setMinimumWidth(220)
+        self.start_delivery_btn.setMinimumHeight(40)
+        self.start_delivery_btn.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        self.start_delivery_btn.setStyleSheet(self.get_button_style("green"))
+        self.start_delivery_btn.clicked.connect(self.open_lid_for_manager)
+        self.start_delivery_btn.setEnabled(False)
+        button_layout.addWidget(self.start_delivery_btn)
+
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
+        return widget
+
+    def create_delivery_control_section(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(14)
+
+        layout.addWidget(self.create_section_label("Active Delivery"))
+
+        status_frame = QFrame()
+        status_frame.setStyleSheet(self.get_frame_style())
+        status_layout = QVBoxLayout(status_frame)
+        status_layout.setSpacing(10)
+
+        self.state_display = QLabel("IDLE")
+        self.state_display.setStyleSheet(
+            "color: #FFD700; font-weight: bold; font-size: 16px;"
+        )
+        self.step_display = QLabel("-")
+        self.step_display.setStyleSheet("color: #87CEEB;")
+        self.queue_display = QLabel("0 delivery request(s) selected")
+        self.queue_display.setStyleSheet("color: #87CEEB;")
+
+        status_layout.addWidget(self.label_row("System State:", self.state_display))
+        status_layout.addWidget(self.label_row("Current Step:", self.step_display))
+        status_layout.addWidget(self.label_row("Queue:", self.queue_display))
+        layout.addWidget(status_frame)
+
+        control_frame = QFrame()
+        control_frame.setStyleSheet(self.get_frame_style())
+        control_layout = QVBoxLayout(control_frame)
+        control_layout.setSpacing(12)
+
+        self.delivery_status_label = QLabel("Waiting for mission status...")
+        self.delivery_status_label.setStyleSheet("color: #D9F2FF;")
+        self.delivery_status_label.setWordWrap(True)
+        control_layout.addWidget(self.delivery_status_label)
+
+        self.lid_open_indicator = QLabel("LID OPEN - Manager loading items")
+        self.lid_open_indicator.setStyleSheet(
+            "color: #90EE90; font-weight: bold; font-size: 13px;"
+        )
+        self.lid_open_indicator.hide()
+        control_layout.addWidget(self.lid_open_indicator)
+
+        action_layout = QHBoxLayout()
+        action_layout.addStretch()
+
+        self.manager_verified_btn = QPushButton("Manager Verified")
+        self.manager_verified_btn.setMinimumWidth(190)
+        self.manager_verified_btn.setMinimumHeight(40)
+        self.manager_verified_btn.setStyleSheet(self.get_button_style("blue"))
+        self.manager_verified_btn.clicked.connect(self.manager_verified)
+        self.manager_verified_btn.hide()
+        action_layout.addWidget(self.manager_verified_btn)
+
+        self.close_start_btn = QPushButton("Start Mission")
+        self.close_start_btn.setMinimumWidth(190)
+        self.close_start_btn.setMinimumHeight(40)
+        self.close_start_btn.setStyleSheet(self.get_button_style("green"))
+        self.close_start_btn.clicked.connect(self.close_lid_and_start)
+        self.close_start_btn.hide()
+        action_layout.addWidget(self.close_start_btn)
+
+        self.user_verified_btn = QPushButton("User Verified")
+        self.user_verified_btn.setMinimumWidth(170)
+        self.user_verified_btn.setMinimumHeight(40)
+        self.user_verified_btn.setStyleSheet(self.get_button_style("blue"))
+        self.user_verified_btn.clicked.connect(self.user_verified)
+        self.user_verified_btn.hide()
+        action_layout.addWidget(self.user_verified_btn)
+
+        self.user_received_btn = QPushButton("Confirm Receipt")
+        self.user_received_btn.setMinimumWidth(170)
+        self.user_received_btn.setMinimumHeight(40)
+        self.user_received_btn.setStyleSheet(self.get_button_style("green"))
+        self.user_received_btn.clicked.connect(self.user_received_item)
+        self.user_received_btn.hide()
+        action_layout.addWidget(self.user_received_btn)
+
+        cancel_btn = QPushButton("Cancel Delivery")
+        cancel_btn.setMinimumWidth(150)
+        cancel_btn.setMinimumHeight(40)
+        cancel_btn.setStyleSheet(self.get_button_style("red"))
+        cancel_btn.clicked.connect(self.cancel_delivery)
+        action_layout.addWidget(cancel_btn)
+
+        action_layout.addStretch()
+        control_layout.addLayout(action_layout)
+        layout.addWidget(control_frame)
+        return widget
+
+    def label_row(self, title, value_widget):
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = QLabel(title)
+        label.setStyleSheet("color: #8FCDF2; font-weight: bold;")
+        layout.addWidget(label)
+        layout.addWidget(value_widget)
+        layout.addStretch()
+        return row
+
+    def create_section_label(self, text):
+        label = QLabel(text)
+        label.setStyleSheet(
+            "font-size: 16px; font-weight: 700; color: #A8D8FF;"
+        )
+        return label
+
+    def get_table_style(self):
+        return """
             QTableWidget {
                 background: rgba(9, 22, 38, 180);
                 border: 1px solid rgba(90, 185, 255, 38);
@@ -99,208 +237,20 @@ class ManagerDashboardPage(QWidget):
                 border: none;
                 font-weight: bold;
             }
-        """)
-        
-        layout.addWidget(self.pending_table)
-        
-        # Control buttons
-        button_layout = QHBoxLayout()
-        button_layout.setSpacing(10)
-        button_layout.addStretch()
-        
-        refresh_btn = QPushButton("Refresh")
-        refresh_btn.setMinimumWidth(100)
-        refresh_btn.setStyleSheet(self.get_button_style("blue"))
-        refresh_btn.clicked.connect(self.refresh_pending_requests)
-        button_layout.addWidget(refresh_btn)
-        
-        self.start_delivery_btn = QPushButton("Open Lid (Manager Verification)")
-        self.start_delivery_btn.setMinimumWidth(250)
-        self.start_delivery_btn.setMinimumHeight(40)
-        self.start_delivery_btn.setFont(QFont("Segoe UI", 12, QFont.Bold))
-        self.start_delivery_btn.setStyleSheet(self.get_button_style("green"))
-        self.start_delivery_btn.clicked.connect(self.open_lid_for_manager)
-        self.start_delivery_btn.setEnabled(False)
-        button_layout.addWidget(self.start_delivery_btn)
-        
-        button_layout.addStretch()
-        layout.addLayout(button_layout)
-        
-        return widget
-    
-    def create_delivery_control_section(self):
-        """Create section for controlling active delivery"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setSpacing(15)
-        
-        layout.addWidget(self.create_section_label("🚀 Active Delivery"))
-        
-        # Status frame
-        status_frame = QFrame()
-        status_frame.setStyleSheet("""
+        """
+
+    def get_frame_style(self):
+        return """
             QFrame {
                 background: rgba(9, 22, 38, 180);
                 border: 1px solid rgba(90, 185, 255, 38);
                 border-radius: 12px;
-                padding: 20px;
+                padding: 16px;
             }
-        """)
-        status_layout = QVBoxLayout(status_frame)
-        status_layout.setSpacing(10)
-        
-        # System state
-        state_layout = QHBoxLayout()
-        state_label = QLabel("System State:")
-        state_label.setStyleSheet("color: #8FCDF2; font-weight: bold;")
-        self.state_display = QLabel("LOADING (Manager verification)")
-        self.state_display.setStyleSheet("color: #FFD700; font-weight: bold;")
-        state_layout.addWidget(state_label)
-        state_layout.addWidget(self.state_display)
-        state_layout.addStretch()
-        status_layout.addLayout(state_layout)
-        
-        # Current step
-        step_layout = QHBoxLayout()
-        step_label = QLabel("Current Step:")
-        step_label.setStyleSheet("color: #8FCDF2; font-weight: bold;")
-        self.step_display = QLabel("-")
-        self.step_display.setStyleSheet("color: #87CEEB;")
-        step_layout.addWidget(step_label)
-        step_layout.addWidget(self.step_display)
-        step_layout.addStretch()
-        status_layout.addLayout(step_layout)
-        
-        # Queue info
-        queue_layout = QHBoxLayout()
-        queue_label = QLabel("Queue:")
-        queue_label.setStyleSheet("color: #8FCDF2; font-weight: bold;")
-        self.queue_display = QLabel("0 deliveries pending")
-        self.queue_display.setStyleSheet("color: #87CEEB;")
-        queue_layout.addWidget(queue_label)
-        queue_layout.addWidget(self.queue_display)
-        queue_layout.addStretch()
-        status_layout.addLayout(queue_layout)
-        
-        layout.addWidget(status_frame)
-        
-        # Control buttons
-        control_layout = QVBoxLayout()
-        control_layout.setSpacing(10)
-        
-        # Manager loading phase
-        manager_layout = QHBoxLayout()
-        manager_layout.addStretch()
-        
-        self.lid_open_indicator = QLabel("🔓 LID OPEN - Manager loading items...")
-        self.lid_open_indicator.setStyleSheet("color: #90EE90; font-weight: bold; font-size: 13px;")
-        manager_layout.addWidget(self.lid_open_indicator)
-        manager_layout.addStretch()
-        
-        control_layout.addLayout(manager_layout)
-        
-        # Close lid and start button
-        close_start_layout = QHBoxLayout()
-        close_start_layout.addStretch()
-        
-        self.close_start_btn = QPushButton("Close Lid / Start Delivery")
-        self.close_start_btn.setMinimumWidth(300)
-        self.close_start_btn.setMinimumHeight(45)
-        self.close_start_btn.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        self.close_start_btn.setStyleSheet(self.get_button_style("green"))
-        self.close_start_btn.clicked.connect(self.close_lid_and_start)
-        close_start_layout.addWidget(self.close_start_btn)
-        
-        close_start_layout.addStretch()
-        control_layout.addLayout(close_start_layout)
-        
-        # Delivery status section (hidden initially)
-        self.delivery_status_frame = QFrame()
-        self.delivery_status_frame.setStyleSheet("""
-            QFrame {
-                background: rgba(9, 22, 38, 180);
-                border: 1px solid rgba(90, 185, 255, 38);
-                border-radius: 12px;
-                padding: 20px;
-            }
-        """)
-        delivery_status_layout = QVBoxLayout(self.delivery_status_frame)
-        delivery_status_layout.setSpacing(10)
-        
-        status_title = QLabel("Delivery Status:")
-        status_title.setStyleSheet("color: #8FCDF2; font-weight: bold; font-size: 14px;")
-        delivery_status_layout.addWidget(status_title)
-        
-        self.delivery_status_label = QLabel("Waiting for first delivery target...")
-        self.delivery_status_label.setStyleSheet("color: #87CEEB;")
-        self.delivery_status_label.setWordWrap(True)
-        delivery_status_layout.addWidget(self.delivery_status_label)
-        
-        # User received button
-        user_button_layout = QHBoxLayout()
-        user_button_layout.addStretch()
-        
-        self.user_received_btn = QPushButton("User Confirmed Receipt (Simulated Vision Verification)")
-        self.user_received_btn.setMinimumWidth(350)
-        self.user_received_btn.setMinimumHeight(40)
-        self.user_received_btn.setStyleSheet(self.get_button_style("blue"))
-        self.user_received_btn.clicked.connect(self.user_received_item)
-        self.user_received_btn.hide()
-        
-        user_button_layout.addWidget(self.user_received_btn)
-        user_button_layout.addStretch()
-        
-        delivery_status_layout.addLayout(user_button_layout)
-        
-        self.delivery_status_frame.hide()
-        control_layout.addWidget(self.delivery_status_frame)
-        
-        # Cancel delivery button
-        cancel_layout = QHBoxLayout()
-        cancel_layout.addStretch()
-        
-        cancel_btn = QPushButton("Cancel Delivery")
-        cancel_btn.setMinimumWidth(150)
-        cancel_btn.setStyleSheet(self.get_button_style("red"))
-        cancel_btn.clicked.connect(self.cancel_delivery)
-        cancel_layout.addWidget(cancel_btn)
-        
-        cancel_layout.addStretch()
-        control_layout.addLayout(cancel_layout)
-        
-        layout.addLayout(control_layout)
-        
-        return widget
-    
-    def create_section_label(self, text):
-        """Create section label"""
-        label = QLabel(text)
-        label.setStyleSheet("font-size: 16px; font-weight: 700; color: #A8D8FF;")
-        return label
-    
+        """
+
     def get_button_style(self, color_type="blue"):
-        """Get button style"""
-        if color_type == "blue":
-            return """
-                QPushButton {
-                    background: rgba(15, 100, 180, 200);
-                    border: 1px solid rgba(100, 195, 255, 80);
-                    border-radius: 8px;
-                    color: #E9F8FF;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background: rgba(20, 120, 200, 220);
-                }
-                QPushButton:pressed {
-                    background: rgba(10, 80, 160, 240);
-                }
-                QPushButton:disabled {
-                    background: rgba(50, 50, 50, 100);
-                    color: rgba(200, 200, 200, 150);
-                }
-            """
-        elif color_type == "green":
+        if color_type == "green":
             return """
                 QPushButton {
                     background: rgba(15, 150, 80, 200);
@@ -309,14 +259,13 @@ class ManagerDashboardPage(QWidget):
                     color: #E9F8FF;
                     font-weight: bold;
                 }
-                QPushButton:hover {
-                    background: rgba(20, 170, 100, 220);
-                }
-                QPushButton:pressed {
-                    background: rgba(10, 130, 70, 240);
+                QPushButton:hover { background: rgba(20, 170, 100, 220); }
+                QPushButton:disabled {
+                    background: rgba(50, 50, 50, 100);
+                    color: rgba(200, 200, 200, 150);
                 }
             """
-        elif color_type == "red":
+        if color_type == "red":
             return """
                 QPushButton {
                     background: rgba(150, 50, 50, 180);
@@ -325,231 +274,291 @@ class ManagerDashboardPage(QWidget):
                     color: #F0F0F0;
                     font-weight: bold;
                 }
-                QPushButton:hover {
-                    background: rgba(180, 60, 60, 220);
-                }
-                QPushButton:pressed {
-                    background: rgba(120, 40, 40, 240);
-                }
+                QPushButton:hover { background: rgba(180, 60, 60, 220); }
             """
-    
+        return """
+            QPushButton {
+                background: rgba(15, 100, 180, 200);
+                border: 1px solid rgba(100, 195, 255, 80);
+                border-radius: 8px;
+                color: #E9F8FF;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: rgba(20, 120, 200, 220); }
+            QPushButton:disabled {
+                background: rgba(50, 50, 50, 100);
+                color: rgba(200, 200, 200, 150);
+            }
+        """
+
     def set_manager(self, username):
-        """Set the current manager"""
         self.current_manager = username
         self.refresh_pending_requests()
-    
+
     def refresh_pending_requests(self):
-        """Refresh the pending requests table"""
+        if self.delivery_section.isVisible():
+            return
+
+        self.capture_pending_selection()
         pending = delivery_system.get_pending_requests()
-        
-        self.pending_table.setRowCount(len(pending))
-        
-        if len(pending) == 0:
-            # Show empty message
-            self.pending_table.setRowCount(1)
-            empty_item = QTableWidgetItem("No pending requests yet. Waiting for user requests...")
-            empty_item.setForeground(Qt.gray)
-            self.pending_table.setItem(0, 0, empty_item)
-            # Disable columns for empty state
+        pending_ids = {request.request_id for request in pending}
+        self.pending_selected_request_ids.intersection_update(pending_ids)
+
+        self.pending_table.blockSignals(True)
+        self.pending_table.setRowCount(len(pending) if pending else 1)
+
+        if not pending:
+            item = QTableWidgetItem("No pending requests yet.")
+            item.setForeground(QColor("#9AA6B2"))
+            self.pending_table.setItem(0, 0, item)
             for col in range(1, 6):
-                span_item = QTableWidgetItem("")
-                self.pending_table.setItem(0, col, span_item)
+                self.pending_table.setItem(0, col, QTableWidgetItem(""))
         else:
             for row, request in enumerate(pending):
-                # Checkbox for selection
                 checkbox = QTableWidgetItem()
-                checkbox.setCheckState(Qt.Unchecked)
+                checkbox.setCheckState(
+                    Qt.Checked
+                    if request.request_id in self.pending_selected_request_ids
+                    else Qt.Unchecked
+                )
                 self.pending_table.setItem(row, 0, checkbox)
-                
                 self.pending_table.setItem(row, 1, QTableWidgetItem(request.request_id))
                 self.pending_table.setItem(row, 2, QTableWidgetItem(request.user_name))
                 self.pending_table.setItem(row, 3, QTableWidgetItem(request.object_requested))
                 self.pending_table.setItem(row, 4, QTableWidgetItem(request.target_station))
-                
                 created_time = request.created_at.strftime("%Y-%m-%d %H:%M")
                 self.pending_table.setItem(row, 5, QTableWidgetItem(created_time))
-        
-        
-        # Update button state
-        self.start_delivery_btn.setEnabled(len(pending) > 0)
-    
-    def get_selected_requests(self):
-        """Get currently selected requests from table"""
-        selected = []
+
+        self.pending_table.blockSignals(False)
+        self.update_start_button_state()
+
+    def capture_pending_selection(self):
+        if not hasattr(self, "pending_table"):
+            return
         for row in range(self.pending_table.rowCount()):
             checkbox_item = self.pending_table.item(row, 0)
-            if checkbox_item and checkbox_item.checkState() == Qt.Checked:
-                request_id = self.pending_table.item(row, 1).text()
-                request = next((r for r in delivery_system.all_requests if r.request_id == request_id), None)
-                if request:
-                    selected.append(request)
-        return selected
-    
-    def open_lid_for_manager(self):
-        """Open lid for manager to load items"""
-        selected = self.get_selected_requests()
-        
-        if not selected:
-            QMessageBox.warning(self, "No Selection", "Please select at least one request to deliver.")
+            id_item = self.pending_table.item(row, 1)
+            if not checkbox_item or not id_item:
+                continue
+            request_id = id_item.text()
+            if checkbox_item.checkState() == Qt.Checked:
+                self.pending_selected_request_ids.add(request_id)
+            else:
+                self.pending_selected_request_ids.discard(request_id)
+
+    def on_pending_item_changed(self, item):
+        if item.column() != 0:
             return
-        
-        # Select requests in system
+        id_item = self.pending_table.item(item.row(), 1)
+        if not id_item:
+            return
+        request_id = id_item.text()
+        if item.checkState() == Qt.Checked:
+            self.pending_selected_request_ids.add(request_id)
+        else:
+            self.pending_selected_request_ids.discard(request_id)
+        self.update_start_button_state()
+
+    def update_start_button_state(self):
+        self.start_delivery_btn.setEnabled(bool(self.pending_selected_request_ids))
+
+    def get_selected_requests(self):
+        self.capture_pending_selection()
+        selected = []
+        for request_id in self.pending_selected_request_ids:
+            request = next(
+                (
+                    r
+                    for r in delivery_system.all_requests
+                    if r.request_id == request_id
+                ),
+                None,
+            )
+            if request and request.status == "pending":
+                selected.append(request)
+        return selected
+
+    def open_lid_for_manager(self):
+        selected = self.get_selected_requests()
+        if not selected:
+            QMessageBox.warning(
+                self,
+                "No Selection",
+                "Please select at least one request to deliver.",
+            )
+            return
+
+        response = self.bridge.start_mission(selected)
+        if not response.get("success"):
+            QMessageBox.warning(
+                self,
+                "Mission Start Failed",
+                response.get("message", "Could not start mission."),
+            )
+            return
+
         for request in selected:
             delivery_system.select_request(request)
-        
-        # ✅ Manager verified (no vision verification needed right now)
-        print(f"✅ Manager {self.current_manager} verified")
-        print(f"📦 Selected {len(selected)} request(s) for delivery")
-        
-        # Switch to delivery control view
+        self.active_mission_request_ids = {r.request_id for r in selected}
+        self.pending_selected_request_ids.clear()
+        self.completed_event_ids.clear()
+        self.terminal_reset_pending = False
         self.pending_section.hide()
         self.delivery_section.show()
-        
-        # Update display
+        self.manager_verified_btn.show()
         self.update_delivery_display()
-    
+
+    def manager_verified(self):
+        response = self.bridge.confirm_manager_verified()
+        if not response.get("success"):
+            QMessageBox.warning(
+                self,
+                "Verification Failed",
+                response.get("message", "Could not confirm manager."),
+            )
+
     def close_lid_and_start(self):
-        """Close lid and start the delivery journey"""
-        if not delivery_system.start_delivery():
-            QMessageBox.warning(self, "Error", "Failed to start delivery.")
-            return
-        
-        # Hide manager loading phase
-        self.lid_open_indicator.hide()
-        self.close_start_btn.hide()
-        
-        # Show delivery status
-        self.delivery_status_frame.show()
-        
-        # Start first delivery
-        self.proceed_to_next_delivery()
-    
-    def proceed_to_next_delivery(self):
-        """Get next delivery from queue"""
-        next_delivery = delivery_system.get_next_delivery()
-        
-        if next_delivery:
-            # Update status
-            self.state_display.setText("DELIVERING")
-            self.state_display.setStyleSheet("color: #FFD700; font-weight: bold;")
-            
-            self.current_delivery_step = next_delivery
-            self.delivery_status_label.setText(
-                f"🤖 Robot navigating to {next_delivery.target_station}...\n"
-                f"Destination: {next_delivery.target_station}\n"
-                f"User: {next_delivery.user_name}\n"
-                f"Item: {next_delivery.object_requested}\n\n"
-                f"Vision system will activate upon arrival for user verification."
-            )
-            
-            # Simulate robot arrival at target
-            self.simulate_robot_arrival()
+        response = self.bridge.confirm_manager_loaded()
+        if response.get("success"):
+            for request_id in self.active_mission_request_ids:
+                delivery_system.update_request_status(request_id, "delivering")
         else:
-            # No more deliveries, return home
-            self.state_display.setText("RETURNING HOME")
-            self.state_display.setStyleSheet("color: #87CEEB; font-weight: bold;")
-            
-            self.delivery_status_label.setText(
-                "✅ All deliveries completed!\n\n"
-                "Robot returning to HOME position..."
+            QMessageBox.warning(
+                self,
+                "Start Mission Failed",
+                response.get("message", "Could not start route."),
             )
-            
-            self.user_received_btn.hide()
-            
-            # After delay, reset
-            QTimer.singleShot(2000, self.complete_delivery_cycle)
-    
-    def simulate_robot_arrival(self):
-        """Simulate robot arriving at target"""
-        QTimer.singleShot(1500, self.activate_user_verification)
-    
-    def activate_user_verification(self):
-        """Ready for user to receive item (no vision verification needed right now)"""
-        if self.current_delivery_step:
-            self.state_display.setText("WAITING FOR USER CONFIRMATION")
-            self.state_display.setStyleSheet("color: #FFD700; font-weight: bold;")
-            
-            self.delivery_status_label.setText(
-                f"📍 Robot arrived at {self.current_delivery_step.target_station}\n\n"
-                f"Waiting for: {self.current_delivery_step.user_name}\n"
-                f"Item: {self.current_delivery_step.object_requested}\n\n"
-                f"Click 'Confirm Receipt' to complete delivery."
+
+    def user_verified(self):
+        response = self.bridge.confirm_user_verified()
+        if not response.get("success"):
+            QMessageBox.warning(
+                self,
+                "User Verification Failed",
+                response.get("message", "Could not confirm user."),
             )
-            
-            self.user_received_btn.setText("✅ Confirm Receipt")
-            self.user_received_btn.show()
-    
+
     def user_received_item(self):
-        """Handle user receiving item"""
-        if not self.current_delivery_step:
-            return
-        
-        # ✅ User confirmed receipt (no vision verification needed right now)
-        print(f"✅ {self.current_delivery_step.user_name} confirmed receipt")
-        
-        # Complete this delivery
-        delivery_system.complete_current_delivery()
-        
-        self.delivery_status_label.setText(
-            f"✅ Item received by {self.current_delivery_step.user_name}\n"
-            f"Lid closing...\n\n"
-            f"Proceeding to next delivery..."
-        )
-        
-        self.user_received_btn.hide()
-        
-        # Proceed to next
-        QTimer.singleShot(1500, self.proceed_to_next_delivery)
-    
-    def complete_delivery_cycle(self):
-        """Complete entire delivery cycle"""
-        delivery_system.reset_delivery_cycle()
-        
-        QMessageBox.information(
-            self,
-            "Delivery Complete",
-            "✅ All deliveries completed successfully!\n\n"
-            "Robot returned to HOME position.\n\n"
-            "Ready for new delivery requests."
-        )
-        
-        # Return to pending requests view
-        self.pending_section.show()
-        self.delivery_section.hide()
-        
-        # Reset controls
-        self.lid_open_indicator.show()
-        self.close_start_btn.show()
-        self.delivery_status_frame.hide()
-        self.user_received_btn.hide()
-        
-        self.refresh_pending_requests()
-    
+        response = self.bridge.confirm_user_received()
+        if not response.get("success"):
+            QMessageBox.warning(
+                self,
+                "Receipt Failed",
+                response.get("message", "Could not confirm receipt."),
+            )
+
     def cancel_delivery(self):
-        """Cancel the current delivery cycle"""
         reply = QMessageBox.question(
             self,
             "Cancel Delivery",
             "Are you sure you want to cancel the current delivery cycle?",
-            QMessageBox.Yes | QMessageBox.No
+            QMessageBox.Yes | QMessageBox.No,
         )
-        
         if reply == QMessageBox.Yes:
-            delivery_system.reset_delivery_cycle()
-            
-            # Return to pending requests view
-            self.pending_section.show()
-            self.delivery_section.hide()
-            
-            # Reset controls
-            self.lid_open_indicator.show()
-            self.close_start_btn.show()
-            self.delivery_status_frame.hide()
-            self.user_received_btn.hide()
-            
-            self.refresh_pending_requests()
-    
+            response = self.bridge.cancel_mission()
+            if not response.get("success"):
+                QMessageBox.warning(
+                    self,
+                    "Cancel Failed",
+                    response.get("message", "Could not cancel mission."),
+                )
+
+    def complete_delivery_cycle(self):
+        delivery_system.reset_delivery_cycle()
+        self.active_mission_request_ids.clear()
+        self.pending_section.show()
+        self.delivery_section.hide()
+        self.manager_verified_btn.hide()
+        self.close_start_btn.hide()
+        self.user_verified_btn.hide()
+        self.user_received_btn.hide()
+        self.lid_open_indicator.hide()
+        self.terminal_reset_pending = False
+        self.refresh_pending_requests()
+
     def update_delivery_display(self):
-        """Update delivery display"""
-        queue_size = len(delivery_system.selected_requests)
-        self.queue_display.setText(f"{queue_size} delivery request(s) selected")
+        count = len(self.active_mission_request_ids)
+        self.queue_display.setText(f"{count} delivery request(s) selected")
+
+    def on_bridge_connection(self, connected, message):
+        self.step_display.setText("Bridge connected" if connected else message)
+
+    def on_bridge_status(self, status):
+        self.latest_status = status
+        mission = status.get("mission", {})
+        if mission:
+            self.apply_mission_status(mission)
+        event = status.get("last_event", {})
+        if event:
+            self.apply_mission_event(event)
+
+    def apply_mission_status(self, mission):
+        state = mission.get("state", "-")
+        detail = mission.get("detail", "")
+        self.state_display.setText(state)
+        self.step_display.setText(detail or "-")
+        self.delivery_status_label.setText(self.format_mission_detail(mission))
+
+        self.manager_verified_btn.setVisible(
+            bool(mission.get("can_confirm_manager_verified"))
+        )
+        self.close_start_btn.setVisible(
+            bool(mission.get("can_confirm_manager_loaded"))
+        )
+        self.lid_open_indicator.setVisible(state == "WAITING_FOR_MANAGER_LOAD")
+        self.user_verified_btn.setVisible(
+            bool(mission.get("can_confirm_user_verified"))
+        )
+        self.user_received_btn.setVisible(
+            bool(mission.get("can_confirm_user_received"))
+        )
+
+        if (
+            state in ("COMPLETE", "ABORTED", "FAULTED")
+            and not self.terminal_reset_pending
+        ):
+            self.terminal_reset_pending = True
+            QTimer.singleShot(600, self.complete_delivery_cycle)
+
+    @staticmethod
+    def format_mission_detail(mission):
+        lines = [mission.get("detail", "")]
+        station = mission.get("current_station", "")
+        target = mission.get("current_target", "")
+        request_id = mission.get("active_request_id", "")
+        user = mission.get("active_user", "")
+        item = mission.get("active_item", "")
+        if station or target:
+            lines.append(f"Station: {station or '-'} | Target: {target or '-'}")
+        if request_id:
+            lines.append(f"Request: {request_id} | User: {user} | Item: {item}")
+        completed = mission.get("completed_count", 0)
+        total = mission.get("total_count", 0)
+        lines.append(f"Progress: {completed}/{total}")
+        if mission.get("safety_paused"):
+            lines.append("Safety stop active")
+        return "\n".join(line for line in lines if line)
+
+    def apply_mission_event(self, event):
+        key = (
+            event.get("event_type"),
+            event.get("request_id"),
+            event.get("message"),
+        )
+        if key == self.last_event_key:
+            return
+        self.last_event_key = key
+
+        event_type = event.get("event_type")
+        request_id = event.get("request_id")
+        if event_type == "REQUEST_COMPLETED" and request_id:
+            delivery_system.update_request_status(request_id, "completed")
+            self.completed_event_ids.add(request_id)
+            self.active_mission_request_ids.discard(request_id)
+            self.update_delivery_display()
+        elif event_type in ("MISSION_CANCELLED", "MISSION_FAULTED"):
+            delivery_system.return_requests_to_pending(
+                list(self.active_mission_request_ids)
+            )
+            self.active_mission_request_ids.clear()
+            self.update_delivery_display()

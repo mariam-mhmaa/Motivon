@@ -18,6 +18,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from motivon_navigation.controller import (
@@ -81,6 +82,13 @@ class NavigationNode(Node):
             10,
             callback_group=self.callback_group,
         )
+        self.create_subscription(
+            String,
+            "/safety/state",
+            self._safety_callback,
+            10,
+            callback_group=self.callback_group,
+        )
         self.create_service(
             Trigger,
             "/navigation/set_home",
@@ -135,6 +143,8 @@ class NavigationNode(Node):
         self.frame_warning_printed = False
         self.latest_obstacle: Optional[ObstacleState] = None
         self.stage_before_obstacle_wait = ""
+        self.safety_stop = False
+        self.stage_before_safety_pause = ""
         self.avoidance_waypoints = []
         self.avoidance_index = 0
         self.avoidance_segment_start: Optional[Waypoint] = None
@@ -449,6 +459,16 @@ class NavigationNode(Node):
         with self.state_lock:
             self.latest_obstacle = message
 
+    def _safety_callback(self, message: String) -> None:
+        safety_state = message.data.strip().upper()
+        with self.state_lock:
+            self.safety_stop = safety_state not in (
+                "",
+                "OK",
+                "CLEAR",
+                "READY",
+            )
+
     def _odom_is_fresh(self, now_ns: int) -> bool:
         return (
             self.latest_odom is not None
@@ -697,6 +717,9 @@ class NavigationNode(Node):
                 self._stop_immediately()
                 self._publish_status(now_ns)
                 return
+            if self._handle_safety_pause(now_ns):
+                self._publish_status(now_ns)
+                return
             if not self._handle_odometry_health(now_ns):
                 self._publish_status(now_ns)
                 return
@@ -734,6 +757,29 @@ class NavigationNode(Node):
             elif self.stage == "HOLDING":
                 self._run_hold(now_ns)
             self._publish_status(now_ns)
+
+    def _handle_safety_pause(self, now_ns: int) -> bool:
+        if self.safety_stop:
+            self._stop_immediately()
+            if self.stage != "SAFETY_PAUSED":
+                self.stage_before_safety_pause = self.stage
+                self.stage = "SAFETY_PAUSED"
+                self.get_logger().warning(
+                    "Navigation paused for safety stop."
+                )
+            self.detail = "Safety stop active; holding navigation goal."
+            self.last_progress_ns = now_ns
+            return True
+
+        if self.stage == "SAFETY_PAUSED":
+            self.stage = self.stage_before_safety_pause or "NAVIGATING"
+            self.stage_before_safety_pause = ""
+            self.detail = "Safety stop cleared; resuming navigation."
+            self.localization_pause_started_ns = None
+            self.localization_recovery_count = 0
+            self.last_progress_ns = now_ns
+            self.best_distance = math.inf
+        return False
 
     def _handle_navigation_obstacle(
         self, pose: Pose2D, now_ns: int

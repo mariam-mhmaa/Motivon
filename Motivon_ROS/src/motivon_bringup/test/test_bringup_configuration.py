@@ -25,7 +25,7 @@ def test_launch_description_constructs_all_base_actions():
     description = module.generate_launch_description()
 
     assert isinstance(description, LaunchDescription)
-    assert len(description.entities) == 5
+    assert len(description.entities) == 6
 
 
 def test_base_parameters_match_pid_geometry():

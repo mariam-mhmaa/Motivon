@@ -1,7 +1,10 @@
+from glob import glob
+import os
+
 from setuptools import find_packages, setup
 
 
-package_name = "motivon_base"
+package_name = "motivon_mission"
 
 
 setup(
@@ -14,18 +17,21 @@ setup(
             ["resource/" + package_name],
         ),
         ("share/" + package_name, ["package.xml"]),
+        (
+            os.path.join("share", package_name, "config"),
+            glob("config/*.yaml"),
+        ),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
     maintainer="Motivon Team",
     maintainer_email="student@example.com",
-    description="Mecanum wheel odometry for the real Motivon delivery robot.",
+    description="Mission workflow manager for Motivon delivery runs.",
     license="MIT",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "wheel_odometry_node = motivon_base.wheel_odometry_node:main",
-            "base_recovery_node = motivon_base.base_recovery_node:main",
+            "mission_manager_node = motivon_mission.mission_manager_node:main",
         ],
     },
 )

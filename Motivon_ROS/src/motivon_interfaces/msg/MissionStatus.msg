@@ -1,0 +1,17 @@
+builtin_interfaces/Time stamp
+string state
+string detail
+string current_target
+string current_station
+string active_request_id
+string active_user
+string active_item
+uint32 completed_count
+uint32 total_count
+bool can_confirm_manager_verified
+bool can_confirm_manager_loaded
+bool can_confirm_user_verified
+bool can_confirm_user_received
+bool mission_active
+bool safety_paused
+bool faulted

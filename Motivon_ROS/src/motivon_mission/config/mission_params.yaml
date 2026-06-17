@@ -1,0 +1,12 @@
+mission_manager_node:
+  ros__parameters:
+    station_a_target: WP1
+    station_b_target: WP2
+    station_c_target: WP3
+    home_target: HOME
+    no_request_hold_s: 3.0
+    service_wait_timeout_s: 5.0
+    lid_motion_timeout_s: 75.0
+    navigation_server_timeout_s: 5.0
+    navigation_goal_timeout_s: 180.0
+    service_retry_count: 3

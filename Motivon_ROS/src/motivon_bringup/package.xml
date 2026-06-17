@@ -14,7 +14,12 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>micro_ros_agent</exec_depend>
   <exec_depend>motivon_base</exec_depend>
+  <exec_depend>motivon_control</exec_depend>
+  <exec_depend>motivon_gui_bridge</exec_depend>
+  <exec_depend>motivon_lid</exec_depend>
+  <exec_depend>motivon_mission</exec_depend>
   <exec_depend>motivon_navigation</exec_depend>
+  <exec_depend>motivon_obstacles</exec_depend>
   <exec_depend>robot_localization</exec_depend>
 
   <test_depend>ament_flake8</test_depend>

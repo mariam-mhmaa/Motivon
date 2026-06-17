@@ -1,0 +1,6 @@
+gui_bridge_node:
+  ros__parameters:
+    host: 0.0.0.0
+    port: 8000
+    initial_mode: AUTO
+    status_publish_period_s: 0.20

@@ -99,12 +99,16 @@ class AnalyticsDashboardPage(QWidget):
         total_count = db.get_request_count()
         completed_count = db.get_request_count("completed")
         pending_count = db.get_request_count("pending")
+        selected_count = db.get_request_count("selected")
+        delivering_count = db.get_request_count("delivering")
         cancelled_count = db.get_request_count("cancelled")
         
         stats = [
             ("Total Requests", str(total_count), "#87CEEB"),
             ("Completed", str(completed_count), "#90EE90"),
             ("Pending", str(pending_count), "#FFD700"),
+            ("Selected", str(selected_count), "#8FCDF2"),
+            ("Delivering", str(delivering_count), "#B9A7FF"),
             ("Cancelled", str(cancelled_count), "#FF6B6B"),
         ]
         
@@ -162,8 +166,16 @@ class AnalyticsDashboardPage(QWidget):
         
         # User stats table
         table = QTableWidget()
-        table.setColumnCount(6)
-        table.setHorizontalHeaderLabels(["User", "Total", "Completed", "Pending", "Cancelled", "Delivering"])
+        table.setColumnCount(7)
+        table.setHorizontalHeaderLabels([
+            "User",
+            "Total",
+            "Completed",
+            "Pending",
+            "Selected",
+            "Delivering",
+            "Cancelled",
+        ])
         table.setStyleSheet("""
             QTableWidget {
                 background-color: #0f1821;
@@ -185,8 +197,9 @@ class AnalyticsDashboardPage(QWidget):
             table.setItem(row, 1, QTableWidgetItem(str(stats['total'])))
             table.setItem(row, 2, QTableWidgetItem(str(stats['completed'])))
             table.setItem(row, 3, QTableWidgetItem(str(stats['pending'])))
-            table.setItem(row, 4, QTableWidgetItem(str(stats['cancelled'])))
+            table.setItem(row, 4, QTableWidgetItem(str(stats['selected'])))
             table.setItem(row, 5, QTableWidgetItem(str(stats['delivering'])))
+            table.setItem(row, 6, QTableWidgetItem(str(stats['cancelled'])))
         
         table.resizeColumnsToContents()
         layout.addWidget(table)

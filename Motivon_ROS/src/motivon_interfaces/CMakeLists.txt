@@ -7,9 +7,12 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/NavigateToTarget.action"
+  "msg/MissionEvent.msg"
+  "msg/MissionStatus.msg"
   "msg/NavigationStatus.msg"
   "msg/ObstacleScan.msg"
   "msg/ObstacleState.msg"
+  "srv/StartMission.srv"
   DEPENDENCIES builtin_interfaces
 )
 

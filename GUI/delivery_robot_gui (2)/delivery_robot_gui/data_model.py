@@ -139,6 +139,37 @@ class DeliverySystem:
             # Update in database
             db.update_request_status(self.current_delivery.request_id, "completed")
             self.current_delivery = None
+
+    def update_request_status(self, request_id: str, status: str) -> bool:
+        """Update one request in memory and in the database"""
+        request = next(
+            (r for r in self.all_requests if r.request_id == request_id),
+            None,
+        )
+        if request is None:
+            return False
+        request.status = status
+        if status != "selected" and request in self.selected_requests:
+            self.selected_requests.remove(request)
+        if status != "delivering" and request in self.delivery_queue:
+            self.delivery_queue.remove(request)
+        if (
+            self.current_delivery is not None
+            and self.current_delivery.request_id == request_id
+            and status != "delivering"
+        ):
+            self.current_delivery = None
+        return db.update_request_status(request_id, status)
+
+    def return_requests_to_pending(self, request_ids: List[str]):
+        """Return unfinished selected/delivering requests to pending"""
+        for request_id in request_ids:
+            request = next(
+                (r for r in self.all_requests if r.request_id == request_id),
+                None,
+            )
+            if request and request.status in ("selected", "delivering"):
+                self.update_request_status(request_id, "pending")
     
     def cancel_delivery(self, request: DeliveryRequest):
         """Cancel a delivery request"""

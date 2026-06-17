@@ -6,9 +6,26 @@ from database import db
 
 class DeliveryAnalytics:
     """Generate analytics and reports for delivery system"""
+    KNOWN_STATUSES = (
+        "completed",
+        "pending",
+        "selected",
+        "delivering",
+        "cancelled",
+    )
     
     def __init__(self):
         self.db = db
+
+    def empty_status_counts(self) -> Dict[str, int]:
+        return {status: 0 for status in self.KNOWN_STATUSES}
+
+    @staticmethod
+    def increment_status(stats: Dict[str, int], status: str) -> None:
+        status = str(status or "unknown")
+        if status not in stats:
+            stats[status] = 0
+        stats[status] += 1
     
     def get_daily_statistics(self, days_back: int = 30) -> Dict[str, Any]:
         """Get statistics for the last N days"""
@@ -24,16 +41,11 @@ class DeliveryAnalytics:
                 date_key = created_at.strftime("%Y-%m-%d")
                 
                 if date_key not in daily_stats:
-                    daily_stats[date_key] = {
-                        'total': 0,
-                        'completed': 0,
-                        'pending': 0,
-                        'cancelled': 0,
-                        'delivering': 0,
-                    }
+                    daily_stats[date_key] = {'total': 0}
+                    daily_stats[date_key].update(self.empty_status_counts())
                 
                 daily_stats[date_key]['total'] += 1
-                daily_stats[date_key][req['status']] += 1
+                self.increment_status(daily_stats[date_key], req['status'])
         
         return daily_stats
     
@@ -46,16 +58,11 @@ class DeliveryAnalytics:
             user = req['user_name']
             
             if user not in user_stats:
-                user_stats[user] = {
-                    'total': 0,
-                    'completed': 0,
-                    'pending': 0,
-                    'cancelled': 0,
-                    'delivering': 0,
-                }
+                user_stats[user] = {'total': 0}
+                user_stats[user].update(self.empty_status_counts())
             
             user_stats[user]['total'] += 1
-            user_stats[user][req['status']] += 1
+            self.increment_status(user_stats[user], req['status'])
         
         return user_stats
     
@@ -147,6 +154,8 @@ class DeliveryAnalytics:
         report.append(f"Total Requests: {total_count}")
         report.append(f"Completed: {self.db.get_request_count('completed')}")
         report.append(f"Pending: {self.db.get_request_count('pending')}")
+        report.append(f"Selected: {self.db.get_request_count('selected')}")
+        report.append(f"Delivering: {self.db.get_request_count('delivering')}")
         report.append(f"Cancelled: {self.db.get_request_count('cancelled')}")
         report.append(f"Completion Rate: {completion_rate:.1f}%")
         
