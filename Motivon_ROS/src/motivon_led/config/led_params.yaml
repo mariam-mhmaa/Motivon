@@ -1,0 +1,20 @@
+led_strip_node:
+  ros__parameters:
+    num_pixels: 20
+    spi_bus: 0
+    spi_device: 0
+    spi_speed_hz: 2400000
+    color_order: GRB
+    status_timeout_s: 2.0
+    override_duration_s: 2.0
+    flash_period_s: 0.50
+    allow_off_during_flash: true
+    startup_color: yellow
+    colors:
+      yellow: [80, 80, 0]
+      orange: [90, 35, 0]
+      green: [0, 80, 0]
+      red: [90, 0, 0]
+      blue: [0, 0, 80]
+      purple: [80, 0, 80]
+      off: [0, 0, 0]

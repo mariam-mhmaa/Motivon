@@ -16,6 +16,7 @@
   <exec_depend>motivon_base</exec_depend>
   <exec_depend>motivon_control</exec_depend>
   <exec_depend>motivon_gui_bridge</exec_depend>
+  <exec_depend>motivon_led</exec_depend>
   <exec_depend>motivon_lid</exec_depend>
   <exec_depend>motivon_mission</exec_depend>
   <exec_depend>motivon_navigation</exec_depend>
