@@ -4,7 +4,7 @@ led_strip_node:
     spi_bus: 0
     spi_device: 0
     spi_speed_hz: 2400000
-    color_order: GRB
+    color_order: BRG
     status_timeout_s: 2.0
     override_duration_s: 2.0
     flash_period_s: 0.50

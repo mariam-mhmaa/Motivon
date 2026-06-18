@@ -35,4 +35,4 @@ def test_led_params_match_verified_strip_test_defaults():
     assert values["spi_bus"] == 0
     assert values["spi_device"] == 0
     assert values["spi_speed_hz"] == 2400000
-    assert values["color_order"] == "GRB"
+    assert values["color_order"] == "BRG"
