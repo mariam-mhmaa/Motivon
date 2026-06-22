@@ -32,7 +32,7 @@ class LidControlNode(Node):
         self.declare_parameter("enc_a_pin", 16)
         self.declare_parameter("enc_b_pin", 20)
         self.declare_parameter("pwm_frequency_hz", 1000)
-        self.declare_parameter("pwm_duty_percent", 40.0)
+        self.declare_parameter("pwm_duty_percent", 65.0)
         self.declare_parameter("open_target_ticks", 40000)
         self.declare_parameter("close_target_ticks", 40000)
         self.declare_parameter("move_timeout_s", 10.0)

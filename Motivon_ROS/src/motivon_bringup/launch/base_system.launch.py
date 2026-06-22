@@ -3,6 +3,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from launch.substitutions import PathJoinSubstitution
 
@@ -10,6 +11,8 @@ from launch.substitutions import PathJoinSubstitution
 def generate_launch_description():
     udp_port = LaunchConfiguration("udp_port")
     start_agent = LaunchConfiguration("start_agent")
+    hardware_reset_enabled = LaunchConfiguration("hardware_reset_enabled")
+    hardware_reset_gpio_bcm = LaunchConfiguration("hardware_reset_gpio_bcm")
 
     base_params = PathJoinSubstitution(
         [FindPackageShare("motivon_bringup"), "config", "base_params.yaml"]
@@ -29,6 +32,16 @@ def generate_launch_description():
                 "start_agent",
                 default_value="true",
                 description="Start the Wi-Fi UDP micro-ROS agent.",
+            ),
+            DeclareLaunchArgument(
+                "hardware_reset_enabled",
+                default_value="true",
+                description="Allow /base/recover to pulse the ESP32 EN reset GPIO.",
+            ),
+            DeclareLaunchArgument(
+                "hardware_reset_gpio_bcm",
+                default_value="26",
+                description="BCM GPIO wired to the ESP32 EN pin.",
             ),
             ExecuteProcess(
                 cmd=[
@@ -69,6 +82,22 @@ def generate_launch_description():
                 executable="base_recovery_node",
                 name="base_recovery_node",
                 output="screen",
+                parameters=[
+                    {
+                        "hardware_reset_enabled": ParameterValue(
+                            hardware_reset_enabled,
+                            value_type=bool,
+                        ),
+                        "hardware_reset_gpio_bcm": ParameterValue(
+                            hardware_reset_gpio_bcm,
+                            value_type=int,
+                        ),
+                        "agent_udp_port": ParameterValue(
+                            udp_port,
+                            value_type=int,
+                        ),
+                    }
+                ],
                 respawn=True,
                 respawn_delay=2.0,
             ),

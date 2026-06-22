@@ -11,6 +11,7 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MOTIVON_ROS_DIR = REPO_ROOT / "Motivon_ROS"
 DEFAULT_PI_SSH = os.environ.get("MOTIVON_PI_SSH", "mohamed@172.20.10.10")
+DEFAULT_BRIDGE_URL = os.environ.get("MOTIVON_BRIDGE_URL", "http://172.20.10.10:8000")
 VISION_PREVIEW_SCRIPT = Path(__file__).resolve().parent / "vision_preview_client.py"
 
 
@@ -72,8 +73,8 @@ def start_pi_camera_stream(pi_ssh: str = DEFAULT_PI_SSH):
             "rpicam-vid -t 0 -n --width 1280 --height 720 --framerate 8 "
             "--codec mjpeg --quality 95 -o - | "
             "ffmpeg -hide_banner -loglevel info -fflags nobuffer -flags low_delay "
-            "-f mjpeg -i pipe:0 -c:v copy -f mjpeg "
-            "'tcp://0.0.0.0:8890?listen=1'",
+            "-f mjpeg -i pipe:0 -c:v copy -flush_packets 1 -f mjpeg "
+            "'tcp://0.0.0.0:8890?listen=1&tcp_nodelay=1'",
         ]
     )
     remote_command = _remote_bash_command(remote_script)
@@ -100,8 +101,11 @@ def start_pi_camera_stream(pi_ssh: str = DEFAULT_PI_SSH):
 
 def start_windows_vision_preview():
     """Start the Windows OpenCV preview fed by the ROS GUI bridge."""
+    env = os.environ.copy()
+    env.setdefault("MOTIVON_BRIDGE_URL", DEFAULT_BRIDGE_URL)
     return subprocess.Popen(
         [sys.executable, str(VISION_PREVIEW_SCRIPT)],
         cwd=str(VISION_PREVIEW_SCRIPT.parent),
+        env=env,
         creationflags=_creation_flags(),
     )

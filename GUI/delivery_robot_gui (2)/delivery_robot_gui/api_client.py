@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - depends on PySide6 build
 
 DEFAULT_BRIDGE_URL = os.environ.get(
     "MOTIVON_BRIDGE_URL",
-    "http://localhost:8000",
+    "http://172.20.10.10:8000",
 )
 
 
@@ -66,9 +66,12 @@ class GuiBridgeClient(QObject):
             with urlopen(self.base_url + path, timeout=2.0) as response:
                 return json.loads(response.read().decode("utf-8"))
         except (OSError, URLError, json.JSONDecodeError) as error:
-            return {"success": False, "message": str(error)}
+            return {
+                "success": False,
+                "message": self.connection_error_message(error),
+            }
 
-    def post(self, path, payload=None):
+    def post(self, path, payload=None, timeout=5.0):
         body = json.dumps(payload or {}).encode("utf-8")
         request = Request(
             self.base_url + path,
@@ -77,10 +80,21 @@ class GuiBridgeClient(QObject):
             method="POST",
         )
         try:
-            with urlopen(request, timeout=5.0) as response:
+            with urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except (OSError, URLError, json.JSONDecodeError) as error:
-            return {"success": False, "message": str(error)}
+            return {
+                "success": False,
+                "message": self.connection_error_message(error),
+            }
+
+    def connection_error_message(self, error):
+        return (
+            f"Could not reach the robot GUI bridge at {self.base_url}.\n\n"
+            "Check that the full ROS launch is still running on the Pi and "
+            "that /gui_bridge_node is present.\n\n"
+            f"Details: {error}"
+        )
 
     def start_mission(self, requests):
         payload = {"requests": [self.request_to_payload(req) for req in requests]}
@@ -108,7 +122,14 @@ class GuiBridgeClient(QObject):
         return self.post(
             "/api/manual-cmd",
             {"linear_x": x, "linear_y": y, "angular_z": yaw},
+            timeout=0.75,
         )
+
+    def recover_base(self):
+        return self.post("/api/base/recover", timeout=60.0)
+
+    def hardware_reset_base(self):
+        return self.post("/api/base/hardware-reset", timeout=60.0)
 
     @staticmethod
     def request_to_payload(request):

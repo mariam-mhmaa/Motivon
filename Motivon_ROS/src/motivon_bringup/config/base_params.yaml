@@ -9,7 +9,7 @@ wheel_odometry_node:
     odom_frame: odom
     base_frame: base_link
     maximum_sample_period_s: 0.25
-    stale_timeout_s: 0.50
+    stale_timeout_s: 1.20
     stale_publish_period_s: 0.05
     maximum_wheel_speed_rad_s: 20.0
     wheel_delta_tolerance_rad: 0.50

@@ -10,7 +10,10 @@ import cv2
 import numpy as np
 
 
-BRIDGE_URL = os.environ.get("MOTIVON_BRIDGE_URL", "http://localhost:8000").rstrip("/")
+BRIDGE_URL = os.environ.get(
+    "MOTIVON_BRIDGE_URL",
+    "http://172.20.10.10:8000",
+).rstrip("/")
 IMAGE_URL = f"{BRIDGE_URL}/api/vision/debug-image.jpg"
 STATUS_URL = f"{BRIDGE_URL}/api/status"
 WINDOW_NAME = "Face Recognition System - Pi RAW TCP Camera"

@@ -7,11 +7,11 @@ navigation_node:
     command_topic: /navigation/cmd_vel_raw
     control_rate_hz: 20.0
 
-    maximum_speed_mps: 0.12
-    maximum_cross_track_speed_mps: 0.08
-    maximum_turn_rate_rad_s: 0.30
-    maximum_linear_acceleration_mps2: 0.25
-    maximum_angular_acceleration_rad_s2: 0.60
+    maximum_speed_mps: 0.10
+    maximum_cross_track_speed_mps: 0.14
+    maximum_turn_rate_rad_s: 0.50
+    maximum_linear_acceleration_mps2: 0.45
+    maximum_angular_acceleration_rad_s2: 1.00
 
     along_track_gain: 0.80
     cross_track_gain: 1.00
@@ -27,12 +27,12 @@ navigation_node:
     arrival_settle_samples: 10
     yaw_settle_samples: 18
 
-    odometry_stale_timeout_s: 0.30
+    odometry_stale_timeout_s: 1.20
     odometry_abort_timeout_s: 5.00
     localization_recovery_samples: 5
     maximum_pose_jump_m: 0.40
     maximum_yaw_jump_rad: 0.70
-    progress_timeout_s: 5.0
+    progress_timeout_s: 10.0
     progress_epsilon_m: 0.015
     enable_static_avoidance: true
     avoidance_lateral_m: 0.65

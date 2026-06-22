@@ -1,5 +1,10 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -8,11 +13,65 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
+def _make_pi_camera_script(context):
+    width = LaunchConfiguration("camera_width").perform(context)
+    height = LaunchConfiguration("camera_height").perform(context)
+    framerate = LaunchConfiguration("camera_framerate").perform(context)
+    quality = LaunchConfiguration("camera_quality").perform(context)
+    port = LaunchConfiguration("camera_port").perform(context)
+
+    return "\n".join(
+        [
+            "set -e",
+            f"echo 'Motivon camera stream starting on TCP {port}'",
+            "echo 'Pi IP:'",
+            "hostname -I",
+            "pkill -x rpicam-vid || true",
+            "pkill -x libcamera-vid || true",
+            "pkill -x ffmpeg || true",
+            "if command -v rpicam-vid >/dev/null 2>&1; then",
+            "  CAMERA_CMD=rpicam-vid",
+            "elif command -v libcamera-vid >/dev/null 2>&1; then",
+            "  CAMERA_CMD=libcamera-vid",
+            "else",
+            "  echo 'ERROR: neither rpicam-vid nor libcamera-vid is installed.'",
+            "  exit 1",
+            "fi",
+            "echo 'Starting rpicam-vid -> ffmpeg stream. Leave launch running.'",
+            f"$CAMERA_CMD -t 0 -n --width {width} --height {height} "
+            f"--framerate {framerate} --codec mjpeg --quality {quality} -o - | "
+            "ffmpeg -hide_banner -loglevel info -fflags nobuffer -flags low_delay "
+            "-f mjpeg -i pipe:0 -c:v copy -flush_packets 1 -f mjpeg "
+            f"'tcp://0.0.0.0:{port}?listen=1&tcp_nodelay=1'",
+        ]
+    )
+
+
+def _camera_stream_actions(context, *args, **kwargs):
+    return [
+        ExecuteProcess(
+            cmd=["bash", "-lc", _make_pi_camera_script(context)],
+            name="pi_camera_stream",
+            output="screen",
+            respawn=True,
+            respawn_delay=2.0,
+            condition=IfCondition(LaunchConfiguration("start_pi_camera_stream")),
+        )
+    ]
+
+
 def generate_launch_description():
     udp_port = LaunchConfiguration("udp_port")
     start_agent = LaunchConfiguration("start_agent")
+    hardware_reset_enabled = LaunchConfiguration("hardware_reset_enabled")
+    hardware_reset_gpio_bcm = LaunchConfiguration("hardware_reset_gpio_bcm")
     start_gpio_nodes = LaunchConfiguration("start_gpio_nodes")
     start_led_node = LaunchConfiguration("start_led_node")
+    camera_host = LaunchConfiguration("camera_host")
+    camera_port = LaunchConfiguration("camera_port")
+    camera_width = LaunchConfiguration("camera_width")
+    camera_height = LaunchConfiguration("camera_height")
+    camera_framerate = LaunchConfiguration("camera_framerate")
     show_vision_preview = LaunchConfiguration("show_vision_preview")
     publish_vision_debug_image = LaunchConfiguration("publish_vision_debug_image")
 
@@ -51,6 +110,8 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("udp_port", default_value="8888"),
             DeclareLaunchArgument("start_agent", default_value="true"),
+            DeclareLaunchArgument("hardware_reset_enabled", default_value="true"),
+            DeclareLaunchArgument("hardware_reset_gpio_bcm", default_value="26"),
             DeclareLaunchArgument(
                 "start_gpio_nodes",
                 default_value="true",
@@ -63,6 +124,17 @@ def generate_launch_description():
                 default_value="true",
                 description="Start the Raspberry Pi SPI LED strip node.",
             ),
+            DeclareLaunchArgument(
+                "start_pi_camera_stream",
+                default_value="true",
+                description="Start the Raspberry Pi camera MJPEG TCP stream for vision.",
+            ),
+            DeclareLaunchArgument("camera_host", default_value="172.20.10.10"),
+            DeclareLaunchArgument("camera_port", default_value="8890"),
+            DeclareLaunchArgument("camera_width", default_value="640"),
+            DeclareLaunchArgument("camera_height", default_value="480"),
+            DeclareLaunchArgument("camera_framerate", default_value="8"),
+            DeclareLaunchArgument("camera_quality", default_value="95"),
             DeclareLaunchArgument(
                 "show_vision_preview",
                 default_value="false",
@@ -78,8 +150,11 @@ def generate_launch_description():
                 launch_arguments={
                     "udp_port": udp_port,
                     "start_agent": start_agent,
+                    "hardware_reset_enabled": hardware_reset_enabled,
+                    "hardware_reset_gpio_bcm": hardware_reset_gpio_bcm,
                 }.items(),
             ),
+            OpaqueFunction(function=_camera_stream_actions),
             Node(
                 package="motivon_navigation",
                 executable="navigation_node",
@@ -169,6 +244,14 @@ def generate_launch_description():
                 parameters=[
                     vision_params,
                     {
+                        "camera_host": camera_host,
+                        "camera_port": ParameterValue(camera_port, value_type=int),
+                        "camera_width": ParameterValue(camera_width, value_type=int),
+                        "camera_height": ParameterValue(camera_height, value_type=int),
+                        "camera_framerate": ParameterValue(
+                            camera_framerate,
+                            value_type=int,
+                        ),
                         "show_preview": ParameterValue(
                             show_vision_preview,
                             value_type=bool,

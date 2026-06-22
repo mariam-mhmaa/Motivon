@@ -9,6 +9,8 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     udp_port = LaunchConfiguration("udp_port")
     start_agent = LaunchConfiguration("start_agent")
+    hardware_reset_enabled = LaunchConfiguration("hardware_reset_enabled")
+    hardware_reset_gpio_bcm = LaunchConfiguration("hardware_reset_gpio_bcm")
 
     base_launch = PathJoinSubstitution(
         [FindPackageShare("motivon_bringup"), "launch", "base_system.launch.py"]
@@ -39,11 +41,15 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("udp_port", default_value="8888"),
             DeclareLaunchArgument("start_agent", default_value="true"),
+            DeclareLaunchArgument("hardware_reset_enabled", default_value="true"),
+            DeclareLaunchArgument("hardware_reset_gpio_bcm", default_value="26"),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(base_launch),
                 launch_arguments={
                     "udp_port": udp_port,
                     "start_agent": start_agent,
+                    "hardware_reset_enabled": hardware_reset_enabled,
+                    "hardware_reset_gpio_bcm": hardware_reset_gpio_bcm,
                 }.items(),
             ),
             Node(

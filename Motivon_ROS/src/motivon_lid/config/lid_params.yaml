@@ -7,7 +7,7 @@ lid_control_node:
     enc_a_pin: 16
     enc_b_pin: 20
     pwm_frequency_hz: 1000
-    pwm_duty_percent: 40.0
+    pwm_duty_percent: 65.0
     open_target_ticks: 42000
     close_target_ticks: 42000
     move_timeout_s: 60.0

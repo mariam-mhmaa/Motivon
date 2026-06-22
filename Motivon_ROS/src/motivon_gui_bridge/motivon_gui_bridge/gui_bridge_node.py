@@ -57,6 +57,8 @@ class GuiBridgeNode(Node):
             "cmd_vel_gate": "",
             "lid": "",
             "base_heartbeat": None,
+            "base_health": "UNKNOWN",
+            "base_health_detail": "",
             "last_event": {},
             "bridge_time_s": time.time(),
         }
@@ -96,6 +98,12 @@ class GuiBridgeNode(Node):
         self.manual_pub = self.create_publisher(Twist, "/manual/input", 10)
         self.software_reset_pub = self.create_publisher(
             Bool, "/base/software_reset", 10
+        )
+        self.base_recover_client = self.create_client(
+            Trigger, "/base/recover", callback_group=self.callback_group
+        )
+        self.base_hardware_reset_client = self.create_client(
+            Trigger, "/base/hardware_reset", callback_group=self.callback_group
         )
 
         self.create_subscription(
@@ -173,6 +181,20 @@ class GuiBridgeNode(Node):
             "/base/heartbeat",
             self.on_base_heartbeat,
             qos_profile_sensor_data,
+            callback_group=self.callback_group,
+        )
+        self.create_subscription(
+            String,
+            "/base/health",
+            self.on_base_health,
+            10,
+            callback_group=self.callback_group,
+        )
+        self.create_subscription(
+            String,
+            "/base/health_detail",
+            self.on_base_health_detail,
+            10,
             callback_group=self.callback_group,
         )
 
@@ -273,6 +295,14 @@ class GuiBridgeNode(Node):
                 "message": "ESP32 software reset command published.",
             }
 
+        @app.post("/api/base/recover")
+        async def base_recover():
+            return await asyncio.to_thread(self.call_base_recover)
+
+        @app.post("/api/base/hardware-reset")
+        async def base_hardware_reset():
+            return await asyncio.to_thread(self.call_base_hardware_reset)
+
         @app.websocket("/ws/status")
         async def websocket_status(websocket: WebSocket):
             await websocket.accept()
@@ -350,6 +380,38 @@ class GuiBridgeNode(Node):
             }
         future = client.call_async(Trigger.Request())
         response = self._wait_for_future(future, 10.0)
+        return self._service_response_dict(response)
+
+    def call_base_recover(self) -> Dict[str, Any]:
+        return self._call_trigger_client(
+            self.base_recover_client,
+            "/base/recover",
+            wait_timeout_s=5.0,
+            response_timeout_s=50.0,
+        )
+
+    def call_base_hardware_reset(self) -> Dict[str, Any]:
+        return self._call_trigger_client(
+            self.base_hardware_reset_client,
+            "/base/hardware_reset",
+            wait_timeout_s=5.0,
+            response_timeout_s=50.0,
+        )
+
+    def _call_trigger_client(
+        self,
+        client,
+        service_name: str,
+        wait_timeout_s: float,
+        response_timeout_s: float,
+    ) -> Dict[str, Any]:
+        if not client.wait_for_service(timeout_sec=wait_timeout_s):
+            return {
+                "success": False,
+                "message": f"{service_name} service is not available.",
+            }
+        future = client.call_async(Trigger.Request())
+        response = self._wait_for_future(future, response_timeout_s)
         return self._service_response_dict(response)
 
     @staticmethod
@@ -508,6 +570,14 @@ class GuiBridgeNode(Node):
     def on_base_heartbeat(self, msg: UInt32) -> None:
         with self.lock:
             self.status_cache["base_heartbeat"] = int(msg.data)
+
+    def on_base_health(self, msg: String) -> None:
+        with self.lock:
+            self.status_cache["base_health"] = msg.data.strip().upper()
+
+    def on_base_health_detail(self, msg: String) -> None:
+        with self.lock:
+            self.status_cache["base_health_detail"] = msg.data
 
 
 def main(args=None) -> None:

@@ -170,11 +170,11 @@ class NavigationNode(Node):
             "expected_base_frame": "base_link",
             "command_topic": "/navigation/cmd_vel_raw",
             "control_rate_hz": 20.0,
-            "maximum_speed_mps": 0.12,
-            "maximum_cross_track_speed_mps": 0.08,
-            "maximum_turn_rate_rad_s": 0.30,
-            "maximum_linear_acceleration_mps2": 0.25,
-            "maximum_angular_acceleration_rad_s2": 0.60,
+            "maximum_speed_mps": 0.10,
+            "maximum_cross_track_speed_mps": 0.14,
+            "maximum_turn_rate_rad_s": 0.50,
+            "maximum_linear_acceleration_mps2": 0.45,
+            "maximum_angular_acceleration_rad_s2": 1.00,
             "along_track_gain": 0.80,
             "cross_track_gain": 1.00,
             "final_position_gain": 0.80,
@@ -187,12 +187,12 @@ class NavigationNode(Node):
             "yaw_tolerance_rad": 0.035,
             "arrival_settle_samples": 10,
             "yaw_settle_samples": 18,
-            "odometry_stale_timeout_s": 0.30,
+            "odometry_stale_timeout_s": 1.20,
             "odometry_abort_timeout_s": 5.00,
             "localization_recovery_samples": 5,
             "maximum_pose_jump_m": 0.40,
             "maximum_yaw_jump_rad": 0.70,
-            "progress_timeout_s": 5.0,
+            "progress_timeout_s": 10.0,
             "progress_epsilon_m": 0.015,
             "enable_static_avoidance": True,
             "avoidance_lateral_m": 0.65,
@@ -835,6 +835,7 @@ class NavigationNode(Node):
         self.side_avoidance = {
             "blocked_direction": blocked_direction,
             "detour_side": detour_side,
+            "obstacle_side": self._opposite_side(detour_side),
             "side_sign": side_sign,
             "longitudinal_sign": longitudinal_sign,
             "start_x": pose.x,
@@ -1070,19 +1071,27 @@ class NavigationNode(Node):
             )
 
         if leg == "FRONT_LONGITUDINAL_FIND_EDGE":
-            detour_side = str(self.side_avoidance.get("detour_side", ""))
+            obstacle_side = str(self.side_avoidance.get("obstacle_side", ""))
             if self._obstacle_distance_is_blocked(
-                detour_side, self.front_avoidance_edge_seen_cm
+                obstacle_side, self.front_avoidance_edge_seen_cm
             ):
                 self.side_avoidance["edge_seen"] = True
                 return False
             return bool(
                 self.side_avoidance.get("edge_seen", False)
             ) and self._obstacle_distance_is_clear(
-                detour_side, self.front_avoidance_edge_clear_cm
+                obstacle_side, self.front_avoidance_edge_clear_cm
             )
 
         return False
+
+    @staticmethod
+    def _opposite_side(side: str) -> str:
+        if side == "left":
+            return "right"
+        if side == "right":
+            return "left"
+        return ""
 
     def _advance_front_back_avoidance_leg(
         self, pose: Pose2D, now_ns: int

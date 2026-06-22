@@ -20,6 +20,7 @@ from motivon_interfaces.srv import StartMission
 
 TERMINAL_STATES = {"IDLE", "COMPLETE", "ABORTED", "FAULTED"}
 SAFETY_CLEAR_VALUES = {"", "OK", "CLEAR", "READY"}
+VISION_MANUAL_OVERRIDE = "__VISION_MANUAL_OVERRIDE__"
 
 
 @dataclass
@@ -60,6 +61,15 @@ class MissionManagerNode(Node):
         self.navigation_goal_timeout_s = float(
             self.get_parameter("navigation_goal_timeout_s").value
         )
+        self.base_recovery_enabled = bool(
+            self.get_parameter("base_recovery_enabled").value
+        )
+        self.base_recovery_timeout_s = float(
+            self.get_parameter("base_recovery_timeout_s").value
+        )
+        self.base_recovery_max_attempts = int(
+            self.get_parameter("base_recovery_max_attempts_per_navigation").value
+        )
         self.service_retry_count = int(
             self.get_parameter("service_retry_count").value
         )
@@ -72,6 +82,18 @@ class MissionManagerNode(Node):
         )
         self.vision_attempt_timeout_s = float(
             self.get_parameter("vision_attempt_timeout_s").value
+        )
+        self.manager_vision_attempt_timeout_s = float(
+            self.get_parameter("manager_vision_attempt_timeout_s").value
+        )
+        self.user_vision_attempt_timeout_s = float(
+            self.get_parameter("user_vision_attempt_timeout_s").value
+        )
+        self.manager_vision_max_attempts = int(
+            self.get_parameter("manager_vision_max_attempts").value
+        )
+        self.user_vision_max_attempts = int(
+            self.get_parameter("user_vision_max_attempts").value
         )
         self.vision_primary_attempts = int(
             self.get_parameter("vision_primary_attempts").value
@@ -129,6 +151,9 @@ class MissionManagerNode(Node):
         )
         self.reset_odom_client = self.create_client(
             Trigger, "/wheel_odometry/reset", callback_group=self.callback_group
+        )
+        self.base_recover_client = self.create_client(
+            Trigger, "/base/recover", callback_group=self.callback_group
         )
 
         self.create_service(
@@ -189,6 +214,13 @@ class MissionManagerNode(Node):
             10,
             callback_group=self.callback_group,
         )
+        self.create_subscription(
+            String,
+            "/base/health",
+            self.base_health_callback,
+            10,
+            callback_group=self.callback_group,
+        )
 
         self.state = "IDLE"
         self.detail = "Ready for selected delivery requests."
@@ -202,6 +234,8 @@ class MissionManagerNode(Node):
         self.safety_paused = False
         self.mode = "AUTO"
         self.latest_lid_status = ""
+        self.base_health = "UNKNOWN"
+        self.base_enable_requested = False
         self.worker: Optional[threading.Thread] = None
         self.active_goal_handle = None
         self.active_vision_goal_handle = None
@@ -212,6 +246,11 @@ class MissionManagerNode(Node):
         self.user_received_event = threading.Event()
 
         self.create_timer(0.10, self.publish_status)
+        self.create_timer(
+            0.50,
+            self._publish_base_enable_state,
+            callback_group=self.callback_group,
+        )
         self.get_logger().info("Mission manager ready.")
 
     def _declare_parameters(self) -> None:
@@ -225,11 +264,18 @@ class MissionManagerNode(Node):
             "lid_motion_timeout_s": 75.0,
             "navigation_server_timeout_s": 5.0,
             "navigation_goal_timeout_s": 180.0,
+            "base_recovery_enabled": True,
+            "base_recovery_timeout_s": 13.0,
+            "base_recovery_max_attempts_per_navigation": 2,
             "service_retry_count": 3,
             "use_vision": True,
             "vision_action_name": "/vision/verify_identity",
             "vision_server_timeout_s": 5.0,
-            "vision_attempt_timeout_s": 8.0,
+            "vision_attempt_timeout_s": 60.0,
+            "manager_vision_attempt_timeout_s": 60.0,
+            "user_vision_attempt_timeout_s": 60.0,
+            "manager_vision_max_attempts": 0,
+            "user_vision_max_attempts": 5,
             "vision_primary_attempts": 3,
             "vision_secondary_attempts": 3,
             "vision_retry_pause_s": 2.0,
@@ -299,6 +345,7 @@ class MissionManagerNode(Node):
             self.completed_request_ids = []
             self.cancel_requested = False
             self.faulted = False
+            self.base_enable_requested = False
             self.active_request = None
             self.current_target = ""
             self.current_station = ""
@@ -348,20 +395,21 @@ class MissionManagerNode(Node):
         return response
 
     def confirm_manager_verified_callback(self, _request, response):
-        if self.use_vision:
-            response.success = False
-            response.message = (
-                "Manager identity is verified automatically by /vision/verify_identity."
-            )
-            return response
         result = self._confirm(
             response,
             "MANAGER_VERIFYING",
             self.manager_verified_event,
-            "Manager verification confirmed.",
+            (
+                "Manager face manually confirmed; vision override accepted."
+                if self.use_vision
+                else "Manager verification confirmed."
+            ),
         )
         if result.success:
-            self._publish_event("VISION_VERIFIED", message=result.message)
+            self._publish_event(
+                "VISION_MANUAL_OVERRIDE" if self.use_vision else "VISION_VERIFIED",
+                message=result.message,
+            )
         return result
 
     def confirm_manager_loaded_callback(self, _request, response):
@@ -373,20 +421,22 @@ class MissionManagerNode(Node):
         )
 
     def confirm_user_verified_callback(self, _request, response):
-        if self.use_vision:
-            response.success = False
-            response.message = (
-                "User identity is verified automatically by /vision/verify_identity."
-            )
-            return response
         result = self._confirm(
             response,
             "USER_VERIFYING",
             self.user_verified_event,
-            "User verification confirmed.",
+            (
+                "User face manually confirmed; vision override accepted."
+                if self.use_vision
+                else "User verification confirmed."
+            ),
         )
         if result.success:
-            self._publish_event("VISION_VERIFIED", message=result.message)
+            self._publish_event(
+                "VISION_MANUAL_OVERRIDE" if self.use_vision else "VISION_VERIFIED",
+                request=self.active_request,
+                message=result.message,
+            )
         return result
 
     def confirm_user_received_callback(self, _request, response):
@@ -431,6 +481,10 @@ class MissionManagerNode(Node):
         with self.lock:
             self.latest_lid_status = msg.data
 
+    def base_health_callback(self, msg: String) -> None:
+        with self.lock:
+            self.base_health = msg.data.strip().upper() or "UNKNOWN"
+
     def _run_mission(self) -> None:
         try:
             self._set_state(
@@ -447,6 +501,9 @@ class MissionManagerNode(Node):
                     "HOME_LOADING",
                     "MANAGER",
                     abort_on_failure=True,
+                    attempt_timeout_s=self.manager_vision_attempt_timeout_s,
+                    max_attempts=self.manager_vision_max_attempts,
+                    override_event=self.manager_verified_event,
                 ):
                     return
             elif not self._wait_for_event(self.manager_verified_event):
@@ -555,6 +612,9 @@ class MissionManagerNode(Node):
                     "STATION_DELIVERY",
                     request.request_id,
                     abort_on_failure=False,
+                    attempt_timeout_s=self.user_vision_attempt_timeout_s,
+                    max_attempts=self.user_vision_max_attempts,
+                    override_event=self.user_verified_event,
                 ):
                     self._publish_event(
                         "REQUEST_SKIPPED_UNVERIFIED",
@@ -619,6 +679,7 @@ class MissionManagerNode(Node):
 
     def _navigate_to(self, target: str) -> bool:
         attempt = 1
+        recovery_attempts = 0
         while attempt <= self.service_retry_count:
             if self._should_stop():
                 return False
@@ -626,6 +687,7 @@ class MissionManagerNode(Node):
                 return False
             if not self._wait_while_manual_mode():
                 return False
+            self._publish_base_enable(True)
             if not self.navigate_client.wait_for_server(
                 timeout_sec=self.navigation_server_timeout_s
             ):
@@ -658,9 +720,19 @@ class MissionManagerNode(Node):
                 self.active_goal_handle = goal_handle
             result_future = goal_handle.get_result_async()
             wait_result = self._wait_for_navigation_result(result_future, target)
+            with self.lock:
+                self.active_goal_handle = None
+            if wait_result == "base_recover":
+                recovery_attempts += 1
+                if recovery_attempts > self.base_recovery_max_attempts:
+                    self._fault(
+                        f"Base telemetry failed repeatedly while navigating to {target}."
+                    )
+                    return False
+                if not self._recover_base_for_navigation(target, recovery_attempts):
+                    return False
+                continue
             if wait_result == "manual_pause":
-                with self.lock:
-                    self.active_goal_handle = None
                 if not self._wait_while_manual_mode():
                     return False
                 continue
@@ -673,8 +745,6 @@ class MissionManagerNode(Node):
                     f"Navigation to {target} returned an invalid result: {error}."
                 )
                 return False
-            with self.lock:
-                self.active_goal_handle = None
             if result.status == NavigateToTarget.Result.STATUS_SUCCEEDED:
                 return True
             if result.status == NavigateToTarget.Result.STATUS_CANCELLED:
@@ -698,6 +768,12 @@ class MissionManagerNode(Node):
                 self.detail = "Manual mode active; navigation goal paused."
                 self._cancel_active_navigation()
                 return "manual_pause"
+            if self._base_health_requires_recovery():
+                self.detail = (
+                    f"Base telemetry is {self.base_health}; pausing route for recovery."
+                )
+                self._cancel_active_navigation()
+                return "base_recover"
             if self.safety_paused:
                 started += 0.10
             elif time.monotonic() - started > self.navigation_goal_timeout_s:
@@ -707,12 +783,54 @@ class MissionManagerNode(Node):
             time.sleep(0.10)
         return "done"
 
+    def _base_health_requires_recovery(self) -> bool:
+        if not self.base_recovery_enabled:
+            return False
+        with self.lock:
+            health = self.base_health
+        return health == "LOST"
+
+    def _recover_base_for_navigation(self, target: str, attempt: int) -> bool:
+        self._publish_base_enable(False)
+        self.detail = (
+            f"Recovering base telemetry before retrying {target} "
+            f"(attempt {attempt}/{self.base_recovery_max_attempts})."
+        )
+        if not self.base_recover_client.wait_for_service(
+            timeout_sec=self.service_wait_timeout_s
+        ):
+            self._fault("/base/recover service is not available.")
+            return False
+        future = self.base_recover_client.call_async(Trigger.Request())
+        if not self._wait_for_future(
+            future,
+            self.base_recovery_timeout_s,
+            "/base/recover",
+        ):
+            self._fault("Base recovery timed out.")
+            return False
+        try:
+            response = future.result()
+        except Exception as error:
+            self._fault(f"Base recovery failed: {error}.")
+            return False
+        if not response.success:
+            self._fault(f"Base recovery failed: {response.message}")
+            return False
+        self.detail = f"Base recovered; retrying navigation to {target}."
+        self._publish_base_enable(True)
+        time.sleep(0.50)
+        return True
+
     def _verify_identity_with_retries(
         self,
         expected_identity: str,
         context: str,
         request_id: str,
         abort_on_failure: bool,
+        attempt_timeout_s: Optional[float] = None,
+        max_attempts: Optional[int] = None,
+        override_event: Optional[threading.Event] = None,
     ) -> bool:
         expected = self._map_identity(expected_identity)
         if not expected:
@@ -723,36 +841,60 @@ class MissionManagerNode(Node):
                 self.detail = message
             return False
 
-        total_attempts = self.vision_primary_attempts + self.vision_secondary_attempts
+        timeout_s = float(
+            attempt_timeout_s
+            if attempt_timeout_s is not None
+            else self.vision_attempt_timeout_s
+        )
+        total_attempts = (
+            int(max_attempts)
+            if max_attempts is not None
+            else self.vision_primary_attempts + self.vision_secondary_attempts
+        )
+        infinite_attempts = total_attempts <= 0
         last_failure = "Vision verification did not run."
 
-        for attempt in range(1, total_attempts + 1):
+        attempt = 1
+        while infinite_attempts or attempt <= total_attempts:
             if self._should_stop():
                 return False
             if not self._wait_while_safety_paused():
                 return False
+            if override_event is not None and override_event.is_set():
+                self.detail = f"Manual face confirmation accepted for {expected}."
+                return True
 
-            if attempt == self.vision_primary_attempts + 1:
+            if attempt > 1:
                 self._set_state(
                     self.state,
                     (
                         f"Vision did not verify {expected}; waiting "
-                        f"{self.vision_retry_pause_s:.1f} s before retry block."
+                        f"{self.vision_retry_pause_s:.1f} s before next attempt."
                     ),
                 )
                 if not self._sleep_interruptible(self.vision_retry_pause_s):
                     return False
 
+            attempt_text = (
+                f"{attempt}/infinite"
+                if infinite_attempts
+                else f"{attempt}/{total_attempts}"
+            )
             self.detail = (
-                f"Vision verification attempt {attempt}/{total_attempts} "
-                f"for {expected}."
+                f"Vision verification attempt {attempt_text} for {expected}; "
+                f"trial time is {timeout_s:.0f} s."
             )
             result = self._send_verify_identity_goal(
                 expected,
                 context,
                 request_id,
                 attempt,
+                timeout_s,
+                override_event,
             )
+            if result == VISION_MANUAL_OVERRIDE:
+                self.detail = f"Manual face confirmation accepted for {expected}."
+                return True
             if result is not None and result.verified:
                 self._publish_event(
                     "VISION_VERIFIED",
@@ -773,10 +915,11 @@ class MissionManagerNode(Node):
             self._publish_event(
                 "VISION_VERIFY_ATTEMPT_FAILED",
                 message=(
-                    f"Attempt {attempt}/{total_attempts} failed for "
+                    f"Attempt {attempt_text} failed for "
                     f"{expected}: {last_failure}"
                 ),
             )
+            attempt += 1
 
         message = f"Vision could not verify {expected}: {last_failure}"
         if abort_on_failure:
@@ -791,6 +934,8 @@ class MissionManagerNode(Node):
         context: str,
         request_id: str,
         attempt: int,
+        timeout_s: float,
+        override_event: Optional[threading.Event],
     ):
         if not self.verify_identity_client.wait_for_server(
             timeout_sec=self.vision_server_timeout_s
@@ -804,7 +949,7 @@ class MissionManagerNode(Node):
         goal.expected_identity = expected
         goal.context = context
         goal.request_id = request_id
-        goal.timeout_s = float(self.vision_attempt_timeout_s)
+        goal.timeout_s = float(timeout_s)
         goal.required_success_frames = int(self.vision_required_success_frames)
         goal.min_confidence = float(self.vision_min_confidence)
 
@@ -833,7 +978,15 @@ class MissionManagerNode(Node):
 
         result_future = goal_handle.get_result_async()
         try:
-            if not self._wait_for_vision_result(result_future, expected):
+            wait_result = self._wait_for_vision_result(
+                result_future,
+                expected,
+                timeout_s,
+                override_event,
+            )
+            if wait_result == VISION_MANUAL_OVERRIDE:
+                return VISION_MANUAL_OVERRIDE
+            if not wait_result:
                 return None
             return result_future.result().result
         except Exception as error:
@@ -854,12 +1007,22 @@ class MissionManagerNode(Node):
                 f"remaining={feedback.remaining_s:.1f} s."
             )
 
-    def _wait_for_vision_result(self, result_future, expected: str) -> bool:
-        deadline = time.monotonic() + self.vision_attempt_timeout_s + 3.0
+    def _wait_for_vision_result(
+        self,
+        result_future,
+        expected: str,
+        timeout_s: float,
+        override_event: Optional[threading.Event],
+    ) -> bool:
+        deadline = time.monotonic() + timeout_s + 3.0
         while not result_future.done():
             if self._should_stop():
                 self._cancel_active_vision()
                 return False
+            if override_event is not None and override_event.is_set():
+                self._cancel_active_vision()
+                self.detail = f"Manual face confirmation accepted for {expected}."
+                return VISION_MANUAL_OVERRIDE
             if self.safety_paused:
                 deadline += 0.10
             elif time.monotonic() > deadline:
@@ -1010,11 +1173,23 @@ class MissionManagerNode(Node):
             self.get_logger().warning(f"Lid stop request failed: {error}")
 
     def _publish_base_enable(self, enabled: bool) -> None:
+        with self.lock:
+            self.base_enable_requested = bool(enabled)
         msg = Bool()
         msg.data = bool(enabled)
-        for _ in range(3):
+        for _ in range(5):
             self.base_enable_pub.publish(msg)
             time.sleep(0.03)
+
+    def _publish_base_enable_state(self) -> None:
+        with self.lock:
+            enabled = self.base_enable_requested
+            health = self.base_health
+        if enabled and health == "RECOVERING":
+            enabled = False
+        msg = Bool()
+        msg.data = bool(enabled)
+        self.base_enable_pub.publish(msg)
 
     def _set_state(self, state: str, detail: str) -> None:
         with self.lock:
@@ -1072,13 +1247,13 @@ class MissionManagerNode(Node):
             status.completed_count = len(self.completed_request_ids)
             status.total_count = len(self.requests)
             status.can_confirm_manager_verified = (
-                not self.use_vision and self.state == "MANAGER_VERIFYING"
+                self.state == "MANAGER_VERIFYING"
             )
             status.can_confirm_manager_loaded = (
                 self.state == "WAITING_FOR_MANAGER_LOAD"
             )
             status.can_confirm_user_verified = (
-                not self.use_vision and self.state == "USER_VERIFYING"
+                self.state == "USER_VERIFYING"
             )
             status.can_confirm_user_received = (
                 self.state == "WAITING_FOR_USER_RECEIPT"

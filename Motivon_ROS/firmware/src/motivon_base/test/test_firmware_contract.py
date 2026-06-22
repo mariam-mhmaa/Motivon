@@ -25,7 +25,7 @@ def constant_value(source: str, name: str) -> int:
 def test_command_watchdog_tolerates_short_wifi_jitter():
     source = FIRMWARE.read_text(encoding="utf-8")
 
-    assert constant_value(source, "COMMAND_TIMEOUT_MS") == 750
+    assert constant_value(source, "COMMAND_TIMEOUT_MS") == 1200
 
 
 def test_publish_failure_limit_requires_a_sustained_outage():
@@ -94,7 +94,7 @@ def test_entity_creation_failures_restart_esp():
     assert "ESP.restart();" in restart_helper
 
 
-def test_connected_micro_ros_loop_does_not_block_on_agent_ping():
+def test_connected_micro_ros_loop_uses_bounded_agent_health_ping():
     source = FIRMWARE.read_text(encoding="utf-8")
 
     discovery_period_ms = constant_value(
@@ -106,15 +106,23 @@ def test_connected_micro_ros_loop_does_not_block_on_agent_ping():
     discovery_attempts = constant_value(
         source, "AGENT_DISCOVERY_PING_ATTEMPTS"
     )
+    health_period_ms = constant_value(source, "AGENT_HEALTH_PERIOD_MS")
+    health_timeout_ms = constant_value(source, "AGENT_HEALTH_PING_TIMEOUT_MS")
+    health_attempts = constant_value(source, "AGENT_HEALTH_PING_ATTEMPTS")
+    spin_timeout_ms = constant_value(source, "MICRO_ROS_SPIN_TIMEOUT_MS")
+    micro_ros_task_start = source.index("void microRosTask")
     connected_case = source[
-        source.index("case AGENT_CONNECTED:")
-        : source.index("case AGENT_DISCONNECTED:")
+        source.index("case AGENT_CONNECTED:", micro_ros_task_start)
+        : source.index("case AGENT_DISCONNECTED:", micro_ros_task_start)
     ]
 
     assert discovery_period_ms >= 2000
     assert discovery_timeout_ms * discovery_attempts <= 50
-    assert "rmw_uros_ping_agent" not in connected_case
-    assert "AGENT_HEALTH_PERIOD_MS" not in connected_case
+    assert health_period_ms >= 10000
+    assert health_timeout_ms * health_attempts <= 200
+    assert spin_timeout_ms == 1
+    assert "rmw_uros_ping_agent" in connected_case
+    assert "AGENT_HEALTH_PERIOD_MS" in connected_case
 
 
 def test_periodic_status_is_non_blocking_and_enable_is_reliable():

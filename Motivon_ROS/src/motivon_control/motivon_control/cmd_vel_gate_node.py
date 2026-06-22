@@ -20,8 +20,8 @@ class CmdVelGateNode(Node):
 
         self.declare_parameter("mode", "AUTO")
         self.declare_parameter("publish_rate_hz", 25.0)
-        self.declare_parameter("command_stale_timeout_s", 0.50)
-        self.declare_parameter("require_obstacle_fresh_in_auto", True)
+        self.declare_parameter("command_stale_timeout_s", 1.20)
+        self.declare_parameter("require_obstacle_fresh_in_auto", False)
 
         self.mode = normalize_mode(str(self.get_parameter("mode").value))
         self.command_stale_timeout_s = float(
@@ -128,10 +128,7 @@ class CmdVelGateNode(Node):
             safety_stop=self.safety_stop,
             obstacle_blocks_auto=(
                 self.obstacle_blocks_auto
-                and not (
-                    self.obstacle_static
-                    and self.navigation_state == "DETOURING"
-                )
+                and self.navigation_state != "DETOURING"
             ),
             navigation_fresh=self.command_fresh(
                 self.navigation_time_s, now_s

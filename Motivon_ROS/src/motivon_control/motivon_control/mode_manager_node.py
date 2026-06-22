@@ -2,6 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import Bool
 from std_msgs.msg import String
 
 from motivon_control.gate_logic import normalize_mode
@@ -18,6 +19,7 @@ class ModeManagerNode(Node):
         self.mode = normalize_mode(str(self.get_parameter("initial_mode").value))
         self.mode_pub = self.create_publisher(String, "/system/mode", 10)
         self.status_pub = self.create_publisher(String, "/system/mode/status", 10)
+        self.base_enable_pub = self.create_publisher(Bool, "/base/enable", 10)
         self.create_subscription(
             String,
             "/system/mode/request",
@@ -37,9 +39,14 @@ class ModeManagerNode(Node):
                 f"Ignoring unsupported mode request: {msg.data!r}"
             )
             return
+        previous_mode = self.mode
         if requested != self.mode:
             self.mode = requested
             self.get_logger().warning(f"Control mode changed to {self.mode}.")
+        if previous_mode == "MANUAL" and self.mode != "MANUAL":
+            self.publish_base_enable(False, repeats=5)
+        elif self.mode == "MANUAL":
+            self.publish_base_enable(True, repeats=5)
         self.publish_mode()
 
     def publish_mode(self) -> None:
@@ -47,6 +54,14 @@ class ModeManagerNode(Node):
         msg.data = self.mode
         self.mode_pub.publish(msg)
         self.status_pub.publish(msg)
+        if self.mode == "MANUAL":
+            self.publish_base_enable(True)
+
+    def publish_base_enable(self, enabled: bool, repeats: int = 1) -> None:
+        msg = Bool()
+        msg.data = bool(enabled)
+        for _ in range(max(1, int(repeats))):
+            self.base_enable_pub.publish(msg)
 
 
 def main(args=None):

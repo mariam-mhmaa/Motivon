@@ -20,11 +20,11 @@ def test_initial_navigation_limits_match_confirmed_configuration():
         document = yaml.safe_load(stream)
     parameters = document["navigation_node"]["ros__parameters"]
 
-    assert parameters["maximum_speed_mps"] == 0.12
-    assert parameters["maximum_cross_track_speed_mps"] == 0.08
-    assert parameters["maximum_turn_rate_rad_s"] == 0.30
-    assert parameters["maximum_linear_acceleration_mps2"] == 0.25
-    assert parameters["maximum_angular_acceleration_rad_s2"] == 0.60
+    assert parameters["maximum_speed_mps"] == 0.10
+    assert parameters["maximum_cross_track_speed_mps"] == 0.14
+    assert parameters["maximum_turn_rate_rad_s"] == 0.50
+    assert parameters["maximum_linear_acceleration_mps2"] == 0.45
+    assert parameters["maximum_angular_acceleration_rad_s2"] == 1.00
     assert parameters["along_track_gain"] == 0.80
     assert parameters["cross_track_gain"] == 1.0
     assert parameters["final_position_gain"] == 0.80
@@ -38,10 +38,10 @@ def test_initial_navigation_limits_match_confirmed_configuration():
     assert parameters["arrival_settle_samples"] == 10
     assert parameters["yaw_settle_samples"] == 18
     assert parameters["odometry_topic"] == "/odometry/filtered"
-    assert parameters["odometry_stale_timeout_s"] == 0.30
+    assert parameters["odometry_stale_timeout_s"] == 1.20
     assert parameters["odometry_abort_timeout_s"] == 5.00
     assert parameters["localization_recovery_samples"] == 5
-    assert parameters["progress_timeout_s"] == 5.0
+    assert parameters["progress_timeout_s"] == 10.0
     assert parameters["enable_static_avoidance"] is True
     assert parameters["avoidance_lateral_m"] == 0.65
     assert parameters["avoidance_forward_m"] == 1.00
@@ -72,3 +72,11 @@ def test_navigation_does_not_subscribe_to_raw_esp_telemetry():
     assert "base_stream_abort_timeout_s" not in parameters
     assert "_wheel_states_callback" not in source
     assert "_imu_callback" not in source
+
+
+def test_front_static_detour_tracks_obstacle_on_opposite_side():
+    source = NODE_SOURCE.read_text(encoding="utf-8")
+
+    assert '"obstacle_side": self._opposite_side(detour_side)' in source
+    assert 'self.side_avoidance.get("obstacle_side", "")' in source
+    assert 'def _opposite_side(side: str)' in source

@@ -17,7 +17,7 @@ def test_lid_parameters_match_verified_gpio_test_script():
     assert values["enc_a_pin"] == 16
     assert values["enc_b_pin"] == 20
     assert values["pwm_frequency_hz"] == 1000
-    assert values["pwm_duty_percent"] == 40.0
+    assert values["pwm_duty_percent"] == 65.0
     assert values["open_target_ticks"] == 42000
     assert values["close_target_ticks"] == 42000
     assert values["move_timeout_s"] == 60.0

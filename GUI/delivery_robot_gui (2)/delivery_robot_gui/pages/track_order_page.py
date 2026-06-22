@@ -73,6 +73,12 @@ class TrackOrderPage(QWidget):
         self.status_table.setStyleSheet(self.table_style())
         active_layout.addWidget(self.status_table)
 
+        self.confirm_face_btn = QPushButton("Confirm Face")
+        self.confirm_face_btn.setMinimumHeight(42)
+        self.confirm_face_btn.setStyleSheet(self.button_style("blue"))
+        self.confirm_face_btn.clicked.connect(self.confirm_face)
+        active_layout.addWidget(self.confirm_face_btn)
+
         self.confirm_receipt_btn = QPushButton("Confirm Order Received")
         self.confirm_receipt_btn.setMinimumHeight(42)
         self.confirm_receipt_btn.setStyleSheet(self.button_style("green"))
@@ -138,9 +144,24 @@ class TrackOrderPage(QWidget):
             label = "DELIVERING" if request.status in ("selected", "delivering") else "DELIVERED"
             self.status_table.setItem(row, 3, QTableWidgetItem(label))
 
+        can_confirm_face = bool(self.latest_mission.get("can_confirm_user_verified"))
         can_confirm = bool(self.latest_mission.get("can_confirm_user_received"))
         active_user = self.latest_mission.get("active_user", "")
+        self.confirm_face_btn.setVisible(
+            can_confirm_face and active_user == self.current_user
+        )
         self.confirm_receipt_btn.setVisible(can_confirm and active_user == self.current_user)
+
+    def confirm_face(self):
+        response = self.bridge.confirm_user_verified()
+        if response.get("success"):
+            self.refresh_orders()
+            return
+        QMessageBox.warning(
+            self,
+            "Face Confirmation Failed",
+            response.get("message", "Could not confirm face."),
+        )
 
     def confirm_receipt(self):
         response = self.bridge.confirm_user_received()

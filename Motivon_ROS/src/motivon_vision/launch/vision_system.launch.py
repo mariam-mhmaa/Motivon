@@ -69,8 +69,8 @@ def _make_camera_script(context):
             f"rpicam-vid -t 0 -n --width {width} --height {height} "
             f"--framerate {framerate} --codec mjpeg --quality {quality} -o - | "
             "ffmpeg -hide_banner -loglevel info -fflags nobuffer -flags low_delay "
-            "-f mjpeg -i pipe:0 -c:v copy -f mjpeg "
-            f"'tcp://0.0.0.0:{port}?listen=1'",
+            "-f mjpeg -i pipe:0 -c:v copy -flush_packets 1 -f mjpeg "
+            f"'tcp://0.0.0.0:{port}?listen=1&tcp_nodelay=1'",
         ]
     )
 

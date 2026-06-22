@@ -9,10 +9,17 @@ mission_manager_node:
     lid_motion_timeout_s: 75.0
     navigation_server_timeout_s: 5.0
     navigation_goal_timeout_s: 180.0
+    base_recovery_enabled: true
+    base_recovery_timeout_s: 13.0
+    base_recovery_max_attempts_per_navigation: 2
     service_retry_count: 3
     vision_action_name: /vision/verify_identity
     vision_server_timeout_s: 5.0
-    vision_attempt_timeout_s: 8.0
+    vision_attempt_timeout_s: 60.0
+    manager_vision_attempt_timeout_s: 60.0
+    user_vision_attempt_timeout_s: 60.0
+    manager_vision_max_attempts: 0
+    user_vision_max_attempts: 5
     vision_primary_attempts: 3
     vision_secondary_attempts: 3
     vision_retry_pause_s: 2.0

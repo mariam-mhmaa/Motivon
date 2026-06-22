@@ -23,6 +23,18 @@ def test_mission_manager_uses_vision_action_for_identity():
     assert "USER_VERIFYING_PLACEHOLDER" not in source
 
 
+def test_mission_manager_uses_role_specific_vision_attempts():
+    source = (ROOT / "motivon_mission" / "mission_manager_node.py").read_text()
+    params = (ROOT / "config" / "mission_params.yaml").read_text()
+
+    assert "manager_vision_max_attempts" in source
+    assert "user_vision_max_attempts" in source
+    assert "manager_vision_max_attempts: 0" in params
+    assert "user_vision_max_attempts: 5" in params
+    assert "manager_vision_attempt_timeout_s: 60.0" in params
+    assert "user_vision_attempt_timeout_s: 60.0" in params
+
+
 def test_mission_manager_uses_fixed_route_targets():
     source = (ROOT / "motivon_mission" / "mission_manager_node.py").read_text()
 

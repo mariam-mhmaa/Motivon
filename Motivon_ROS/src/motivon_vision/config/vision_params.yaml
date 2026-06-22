@@ -1,7 +1,7 @@
 vision_node:
   ros__parameters:
-    # Leave empty to auto-detect the existing "Vision again/Vision again" folder
-    # from the cloned repository. Set an absolute path on the Pi if needed.
+    # Leave empty to auto-detect the existing "Vision again/Vision again"
+    # backend folder from the repository root.
     vision_project_dir: ""
 
     camera_host: 172.20.10.10

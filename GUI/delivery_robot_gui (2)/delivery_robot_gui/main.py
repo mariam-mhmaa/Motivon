@@ -1,7 +1,8 @@
 import sys
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QStackedWidget, QLabel, QPushButton, QScrollArea, QFrame, QSizePolicy
+    QStackedWidget, QLabel, QPushButton, QScrollArea, QFrame, QSizePolicy,
+    QMessageBox,
 )
 from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, QParallelAnimationGroup
 from PySide6.QtGui import QPixmap
@@ -15,6 +16,7 @@ from pages.request_page import RequestPage
 from pages.manual_control_page import ManualControlPage
 from pages.track_order_page import TrackOrderPage
 from widgets.sidebar import Sidebar
+from api_client import GuiBridgeClient
 from data_model import delivery_system
 
 # Global list to track all open windows
@@ -32,6 +34,8 @@ class MainWindow(QMainWindow):
         self.bg_original = None
         self.current_user_type = None  # "user" or "manager"
         self.current_user = None
+        self.bridge = GuiBridgeClient(parent=self)
+        self.recover_base_btn = None
 
         self.background_label = QLabel(self)
         self.background_label.setScaledContents(True)
@@ -303,6 +307,29 @@ class MainWindow(QMainWindow):
         """)
         new_session_btn.clicked.connect(self.open_new_session)
         layout.addWidget(new_session_btn)
+
+        self.recover_base_btn = QPushButton("Recover Base")
+        self.recover_base_btn.setMaximumWidth(140)
+        self.recover_base_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(184, 48, 72, 210);
+                border: 1px solid rgba(255, 155, 170, 95);
+                border-radius: 8px;
+                color: #F8FBFF;
+                padding: 6px 12px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: rgba(205, 60, 85, 235);
+            }
+            QPushButton:disabled {
+                background: rgba(60, 60, 60, 120);
+                color: rgba(210, 210, 210, 150);
+            }
+        """)
+        self.recover_base_btn.clicked.connect(self.recover_base)
+        layout.addWidget(self.recover_base_btn)
         
         # User info pill
         self.user_pill = QLabel("Not logged in")
@@ -317,6 +344,28 @@ class MainWindow(QMainWindow):
             layout.addWidget(pill)
 
         return topbar
+
+    def recover_base(self):
+        if self.recover_base_btn is not None:
+            self.recover_base_btn.setEnabled(False)
+            self.recover_base_btn.setText("Recovering...")
+        QApplication.processEvents()
+        response = self.bridge.recover_base()
+        if self.recover_base_btn is not None:
+            self.recover_base_btn.setEnabled(True)
+            self.recover_base_btn.setText("Recover Base")
+        if response.get("success"):
+            QMessageBox.information(
+                self,
+                "Base Recovered",
+                response.get("message", "Base recovery completed."),
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "Base Recovery Failed",
+                response.get("message", "Base recovery failed."),
+            )
     
     def update_topbar_subtitle(self, text):
         """Update topbar subtitle"""

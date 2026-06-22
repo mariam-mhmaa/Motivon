@@ -45,7 +45,7 @@ class WheelOdometryNode(Node):
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("maximum_sample_period_s", 0.25)
-        self.declare_parameter("stale_timeout_s", 0.50)
+        self.declare_parameter("stale_timeout_s", 1.20)
         self.declare_parameter("stale_publish_period_s", 0.05)
         self.declare_parameter("maximum_wheel_speed_rad_s", 20.0)
         self.declare_parameter("wheel_delta_tolerance_rad", 0.50)

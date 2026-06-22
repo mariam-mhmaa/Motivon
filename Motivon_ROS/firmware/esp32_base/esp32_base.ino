@@ -32,7 +32,9 @@ constexpr uint32_t IMU_PERIOD_MS = 10;
 constexpr uint32_t WHEEL_TELEMETRY_PERIOD_MS = 40;
 constexpr uint32_t IMU_TELEMETRY_PERIOD_MS = 40;
 constexpr uint32_t STATUS_PERIOD_MS = 1000;
-constexpr uint32_t COMMAND_TIMEOUT_MS = 750;
+constexpr uint32_t MICRO_ROS_SPIN_TIMEOUT_MS = 1;
+constexpr uint32_t MICRO_ROS_LOOP_DELAY_MS = 2;
+constexpr uint32_t COMMAND_TIMEOUT_MS = 1200;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 constexpr uint32_t WIFI_RETRY_DELAY_MS = 2000;
 constexpr uint32_t AGENT_DISCOVERY_PERIOD_MS = 2000;
@@ -47,6 +49,7 @@ constexpr uint8_t AGENT_FAILURE_LIMIT = 6;
 constexpr uint8_t ENTITY_CREATION_FAILURE_LIMIT = 5;
 constexpr uint8_t PUBLISH_FAILURE_LIMIT = 20;
 constexpr uint8_t IMU_FAILURE_LIMIT = 5;
+constexpr uint32_t I2C_TIMEOUT_MS = 10;
 constexpr float FILTER_ALPHA = 0.25f;
 
 constexpr float MAX_VX_MPS = 0.20f;
@@ -224,6 +227,10 @@ volatile bool software_reset_requested = false;
 
 void stopAllMotors();
 
+void yieldScheduler() {
+  taskYIELD();
+}
+
 const char *agentStateName(AgentState state) {
   switch (state) {
     case WAITING_FOR_AGENT:
@@ -388,6 +395,7 @@ bool bmi160ReadGyro(float &gx_dps, float &gy_dps, float &gz_dps) {
 bool bmi160Init() {
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(400000);
+  Wire.setTimeOut(I2C_TIMEOUT_MS);
   delay(100);
 
   if (!bmi160Detect()) {
@@ -720,6 +728,7 @@ rcl_ret_t publishStatusTelemetry() {
   ++heartbeat_message.data;
   const rcl_ret_t imu_status_result =
       rcl_publish(&imu_ok_publisher, &imu_ok_message, nullptr);
+  yieldScheduler();
   const rcl_ret_t heartbeat_result =
       rcl_publish(&heartbeat_publisher, &heartbeat_message, nullptr);
   return imu_status_result != RCL_RET_OK
@@ -1045,6 +1054,7 @@ void controlTask(void *) {
     telemetry_counts[3] = rr_count;
     portEXIT_CRITICAL(&telemetry_mux);
 
+    yieldScheduler();
     vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(CONTROL_PERIOD_MS));
   }
 }
@@ -1077,6 +1087,7 @@ void imuTask(void *) {
     }
     portEXIT_CRITICAL(&imu_mux);
 
+    yieldScheduler();
     vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(IMU_PERIOD_MS));
   }
 }
@@ -1119,6 +1130,7 @@ void microRosTask(void *) {
   uint32_t next_wheel_publish_ms = 0;
   uint32_t next_imu_publish_ms = 0;
   uint32_t next_status_publish_ms = 0;
+  uint32_t next_health_check_ms = 0;
   uint8_t consecutive_discovery_failures = 0;
   uint8_t consecutive_entity_failures = 0;
   uint8_t consecutive_publish_failures = 0;
@@ -1190,6 +1202,7 @@ void microRosTask(void *) {
           next_wheel_publish_ms = now_ms;
           next_imu_publish_ms = now_ms + 20;
           next_status_publish_ms = now_ms + STATUS_PERIOD_MS;
+          next_health_check_ms = now_ms + AGENT_HEALTH_PERIOD_MS;
           consecutive_entity_failures = 0;
           consecutive_publish_failures = 0;
           Serial.println(
@@ -1217,8 +1230,25 @@ void microRosTask(void *) {
         break;
 
       case AGENT_CONNECTED: {
-        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(1));
+        rclc_executor_spin_some(
+            &executor, RCL_MS_TO_NS(MICRO_ROS_SPIN_TIMEOUT_MS));
+        yieldScheduler();
         restartIfRequested();
+
+        // Periodic agent health ping: detect silent agent deaths before
+        // publish failures accumulate.
+        if (static_cast<int32_t>(now_ms - next_health_check_ms) >= 0) {
+          if (rmw_uros_ping_agent(
+                  AGENT_HEALTH_PING_TIMEOUT_MS,
+                  AGENT_HEALTH_PING_ATTEMPTS) != RMW_RET_OK) {
+            Serial.printf(
+                "[micro_ros] Agent health ping failed; disconnecting.\n");
+            setAgentState(AGENT_DISCONNECTED);
+            break;
+          }
+          consecutive_publish_failures = 0;
+          next_health_check_ms = millis() + AGENT_HEALTH_PERIOD_MS;
+        }
 
         bool publish_attempted = false;
         const char *published_topic = "";
@@ -1228,6 +1258,7 @@ void microRosTask(void *) {
           publish_attempted = true;
           published_topic = "/base/wheel_states";
           publish_result = publishWheelTelemetry();
+          yieldScheduler();
           next_wheel_publish_ms =
               millis() + WHEEL_TELEMETRY_PERIOD_MS;
         } else if (static_cast<int32_t>(
@@ -1235,6 +1266,7 @@ void microRosTask(void *) {
           publish_attempted = true;
           published_topic = "/imu/data_raw";
           publish_result = publishImuTelemetry();
+          yieldScheduler();
           next_imu_publish_ms =
               millis() + IMU_TELEMETRY_PERIOD_MS;
         } else if (static_cast<int32_t>(
@@ -1242,6 +1274,7 @@ void microRosTask(void *) {
           publish_attempted = true;
           published_topic = "/base/status";
           publish_result = publishStatusTelemetry();
+          yieldScheduler();
           next_status_publish_ms = millis() + STATUS_PERIOD_MS;
         }
 
@@ -1256,10 +1289,27 @@ void microRosTask(void *) {
                 published_topic,
                 static_cast<int>(publish_result),
                 static_cast<unsigned int>(consecutive_publish_failures));
-            if (
-                consecutive_publish_failures >=
-                PUBLISH_FAILURE_LIMIT) {
-              setAgentState(AGENT_DISCONNECTED);
+            if (consecutive_publish_failures >= PUBLISH_FAILURE_LIMIT) {
+              // Ping the agent to confirm it is actually gone before
+              // tearing down all entities.  A transient WiFi blip can
+              // produce many consecutive failures without the agent being
+              // truly offline.
+              if (rmw_uros_ping_agent(
+                      AGENT_HEALTH_PING_TIMEOUT_MS,
+                      AGENT_HEALTH_PING_ATTEMPTS) != RMW_RET_OK) {
+                Serial.printf(
+                    "[micro_ros] Agent unreachable after %u publish "
+                    "failures; disconnecting.\n",
+                    static_cast<unsigned int>(consecutive_publish_failures));
+                setAgentState(AGENT_DISCONNECTED);
+              } else {
+                Serial.printf(
+                    "[micro_ros] Agent still reachable; clearing %u "
+                    "publish failures.\n",
+                    static_cast<unsigned int>(consecutive_publish_failures));
+                consecutive_publish_failures = 0;
+                next_health_check_ms = millis() + AGENT_HEALTH_PERIOD_MS;
+              }
             }
           }
         }
@@ -1278,7 +1328,7 @@ void microRosTask(void *) {
         setAgentState(WAITING_FOR_AGENT);
         break;
     }
-    vTaskDelay(pdMS_TO_TICKS(2));
+    vTaskDelay(pdMS_TO_TICKS(MICRO_ROS_LOOP_DELAY_MS));
   }
 }
 

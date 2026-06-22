@@ -25,7 +25,7 @@ def test_launch_description_constructs_all_base_actions():
     description = module.generate_launch_description()
 
     assert isinstance(description, LaunchDescription)
-    assert len(description.entities) == 6
+    assert len(description.entities) == 8
 
 
 def test_base_parameters_match_pid_geometry():
@@ -38,7 +38,7 @@ def test_base_parameters_match_pid_geometry():
     assert parameters["odom_x_scale"] == 1.0
     assert parameters["odom_y_scale"] == 0.948
     assert parameters["maximum_sample_period_s"] == 0.25
-    assert parameters["stale_timeout_s"] == 0.50
+    assert parameters["stale_timeout_s"] == 1.20
     assert parameters["maximum_wheel_speed_rad_s"] == 20.0
 
 

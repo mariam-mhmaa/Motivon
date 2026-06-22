@@ -20,6 +20,28 @@ from mission_display import destination_text
 from system_launcher import start_windows_vision_preview
 
 
+ACTIVE_MISSION_STATES = {
+    "REQUESTS_RECEIVED",
+    "MANAGER_VERIFYING",
+    "OPENING_LID_FOR_LOADING",
+    "WAITING_FOR_MANAGER_LOAD",
+    "SETTING_HOME",
+    "CLOSING_LID_AFTER_LOADING",
+    "NAVIGATING_TO_WP1",
+    "HANDLING_WP1",
+    "NAVIGATING_TO_WP2",
+    "HANDLING_WP2",
+    "NAVIGATING_TO_WP3",
+    "HANDLING_WP3",
+    "USER_VERIFYING",
+    "OPENING_LID_FOR_USER",
+    "WAITING_FOR_USER_RECEIPT",
+    "CLOSING_LID_AFTER_USER",
+    "RETURNING_HOME",
+    "NO_REQUEST_HOLDING_3S",
+}
+
+
 class ManagerDashboardPage(QWidget):
     """Manager dashboard for real robot mission control."""
 
@@ -34,6 +56,7 @@ class ManagerDashboardPage(QWidget):
         self.last_event_key = None
         self.latest_status = {}
         self.current_mode = "AUTO"
+        self.bridge_connected = False
         self.terminal_reset_pending = False
         self.preview_process = None
 
@@ -126,12 +149,33 @@ class ManagerDashboardPage(QWidget):
         layout = QHBoxLayout(frame)
         layout.setSpacing(12)
 
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(6)
+
         self.system_launch_label = QLabel(
             "ROS launch starts camera + vision. This button only opens the camera preview."
         )
         self.system_launch_label.setStyleSheet("color: #A8D8FF;")
         self.system_launch_label.setWordWrap(True)
-        layout.addWidget(self.system_launch_label, 1)
+        info_layout.addWidget(self.system_launch_label)
+
+        self.bridge_status_label = QLabel("Bridge: connecting...")
+        self.vision_status_label = QLabel("Vision: waiting for status")
+        self.camera_status_label = QLabel("Camera: waiting for status")
+        self.face_status_label = QLabel("Face: waiting for status")
+        self.base_status_label = QLabel("Base: waiting for telemetry")
+        for label in (
+            self.bridge_status_label,
+            self.base_status_label,
+            self.vision_status_label,
+            self.camera_status_label,
+            self.face_status_label,
+        ):
+            label.setStyleSheet("color: #D9F2FF; font-weight: 650;")
+            label.setWordWrap(True)
+            info_layout.addWidget(label)
+
+        layout.addLayout(info_layout, 1)
 
         self.start_system_btn = QPushButton("Open Preview")
         self.start_system_btn.setMinimumWidth(150)
@@ -156,7 +200,7 @@ class ManagerDashboardPage(QWidget):
 
         messages.append(
             "Camera stream, ROS vision, and GUI bridge are started by "
-            "mission_gui_test.launch.py."
+            "the Pi full launch. This button only opens the Windows preview."
         )
 
         message = "\n".join(messages)
@@ -284,7 +328,7 @@ class ManagerDashboardPage(QWidget):
         action_layout = QHBoxLayout()
         action_layout.addStretch()
 
-        self.manager_verified_btn = QPushButton("Manager Verified")
+        self.manager_verified_btn = QPushButton("Confirm Manager Face")
         self.manager_verified_btn.setMinimumWidth(190)
         self.manager_verified_btn.setMinimumHeight(40)
         self.manager_verified_btn.setStyleSheet(self.get_button_style("blue"))
@@ -300,7 +344,7 @@ class ManagerDashboardPage(QWidget):
         self.close_start_btn.hide()
         action_layout.addWidget(self.close_start_btn)
 
-        self.user_verified_btn = QPushButton("User Verified")
+        self.user_verified_btn = QPushButton("Confirm User Face")
         self.user_verified_btn.setMinimumWidth(170)
         self.user_verified_btn.setMinimumHeight(40)
         self.user_verified_btn.setStyleSheet(self.get_button_style("blue"))
@@ -528,7 +572,7 @@ class ManagerDashboardPage(QWidget):
         if not response.get("success"):
             QMessageBox.warning(
                 self,
-                "Mission Start Failed",
+                "Bridge Connection Failed",
                 response.get("message", "Could not start mission."),
             )
             return
@@ -541,7 +585,11 @@ class ManagerDashboardPage(QWidget):
         self.terminal_reset_pending = False
         self.pending_section.hide()
         self.delivery_section.show()
-        self.manager_verified_btn.show()
+        self.state_display.setText("MANAGER_VERIFYING")
+        self.step_display.setText("Waiting for vision to verify the manager.")
+        self.delivery_status_label.setText(
+            "Manager verification requested. Watch the Vision/Camera status above."
+        )
         self.update_delivery_display()
 
     def manager_verified(self):
@@ -610,10 +658,21 @@ class ManagerDashboardPage(QWidget):
         self.refresh_pending_requests()
 
     def update_delivery_display(self):
-        count = len(self.active_mission_request_ids)
+        mission = self.latest_status.get("mission", {}) if self.latest_status else {}
+        count = len(self.active_mission_request_ids) or int(
+            mission.get("total_count", 0) or 0
+        )
         self.queue_display.setText(f"{count} delivery request(s) selected")
 
     def on_bridge_connection(self, connected, message):
+        self.bridge_connected = bool(connected)
+        if hasattr(self, "bridge_status_label"):
+            text = "Bridge: connected" if connected else f"Bridge: {message}"
+            color = "#90EE90" if connected else "#FFB347"
+            self.bridge_status_label.setText(text)
+            self.bridge_status_label.setStyleSheet(
+                f"color: {color}; font-weight: 750;"
+            )
         self.step_display.setText("Bridge connected" if connected else message)
 
     def on_bridge_status(self, status):
@@ -624,6 +683,7 @@ class ManagerDashboardPage(QWidget):
                 "AUTO Mode Active" if self.current_mode == "AUTO" else "Set AUTO Mode"
             )
         mission = status.get("mission", {})
+        self.update_robot_debug_status(status)
         if mission:
             self.apply_mission_status(mission)
         event = status.get("last_event", {})
@@ -633,7 +693,12 @@ class ManagerDashboardPage(QWidget):
     def apply_mission_status(self, mission):
         state = mission.get("state", "-")
         detail = mission.get("detail", "")
+        if state in ACTIVE_MISSION_STATES:
+            self.show_active_delivery_view()
         self.state_display.setText(state)
+        self.state_display.setStyleSheet(
+            f"color: {self.state_color(state)}; font-weight: 850; font-size: 28px;"
+        )
         self.destination_display.setText(destination_text(mission))
         self.step_display.setText(detail or "-")
         self.delivery_status_label.setText(self.format_mission_detail(mission))
@@ -648,6 +713,7 @@ class ManagerDashboardPage(QWidget):
         self.user_verified_btn.setVisible(
             bool(mission.get("can_confirm_user_verified"))
         )
+        self.update_delivery_display()
 
         if (
             state in ("COMPLETE", "ABORTED", "FAULTED")
@@ -656,6 +722,83 @@ class ManagerDashboardPage(QWidget):
             self.reconcile_terminal_mission(mission)
             self.terminal_reset_pending = True
             QTimer.singleShot(600, self.complete_delivery_cycle)
+
+    def show_active_delivery_view(self):
+        if self.pending_section.isVisible():
+            self.pending_section.hide()
+        if not self.delivery_section.isVisible():
+            self.delivery_section.show()
+
+    def update_robot_debug_status(self, status):
+        if not hasattr(self, "vision_status_label"):
+            return
+
+        vision = status.get("vision", {}) or {}
+        detection = status.get("vision_detection", {}) or {}
+        mission = status.get("mission", {}) or {}
+        base_health = str(status.get("base_health", "UNKNOWN") or "UNKNOWN").upper()
+        base_detail = status.get("base_health_detail", "") or ""
+        heartbeat = status.get("base_heartbeat", None)
+
+        base_color = {
+            "HEALTHY": "#90EE90",
+            "RECOVERING": "#FFD166",
+            "WARMING_UP": "#FFD166",
+            "STALE": "#FFB347",
+            "LOST": "#FF6B6B",
+            "FAILED": "#FF6B6B",
+            "IMU_NOT_OK": "#FF6B6B",
+        }.get(base_health, "#FFB347")
+        heartbeat_text = "-" if heartbeat is None else str(heartbeat)
+        self.base_status_label.setText(
+            f"Base: {base_health} | heartbeat: {heartbeat_text} | {base_detail}"
+        )
+        self.base_status_label.setStyleSheet(
+            f"color: {base_color}; font-weight: 750;"
+        )
+
+        vision_state = vision.get("state") or "NO STATUS"
+        vision_detail = vision.get("detail") or "-"
+        expected = vision.get("expected_identity") or mission.get("active_user") or "-"
+        if mission.get("state") == "MANAGER_VERIFYING":
+            expected = vision.get("expected_identity") or self.current_manager or "-"
+
+        busy = bool(vision.get("busy"))
+        camera_ok = bool(vision.get("camera_ok"))
+        model_ok = bool(vision.get("model_ok"))
+        face_detected = bool(vision.get("face_detected"))
+        last_identity = vision.get("last_identity") or detection.get("person_name") or "-"
+        confidence = float(vision.get("last_confidence", 0.0) or 0.0)
+
+        if mission.get("state") in ("MANAGER_VERIFYING", "USER_VERIFYING"):
+            verify_text = "actively verifying"
+        elif mission.get("state") in ("OPENING_LID_FOR_LOADING", "OPENING_LID_FOR_USER"):
+            verify_text = "verified; opening lid"
+        elif mission.get("state") == "FAULTED":
+            verify_text = "faulted or rejected"
+        else:
+            verify_text = "idle/monitoring"
+
+        vision_color = "#90EE90" if model_ok else "#FF6B6B"
+        camera_color = "#90EE90" if camera_ok else "#FFB347"
+        if busy:
+            vision_color = "#FFD166"
+
+        self.vision_status_label.setText(
+            f"Vision: {vision_state} | {verify_text} | expected: {expected}"
+        )
+        self.vision_status_label.setStyleSheet(
+            f"color: {vision_color}; font-weight: 750;"
+        )
+        self.camera_status_label.setText(
+            f"Camera: {'OK' if camera_ok else 'not connected'} | Model: {'OK' if model_ok else 'not ready'}"
+        )
+        self.camera_status_label.setStyleSheet(
+            f"color: {camera_color}; font-weight: 750;"
+        )
+        self.face_status_label.setText(
+            f"Face: {'detected' if face_detected else 'not detected'} | Last identity: {last_identity} | Confidence: {confidence:.2f} | {vision_detail}"
+        )
 
     def reconcile_terminal_mission(self, mission):
         if not self.active_mission_request_ids:
@@ -698,6 +841,33 @@ class ManagerDashboardPage(QWidget):
         if mission.get("safety_paused"):
             lines.append("Safety stop active")
         return "\n".join(line for line in lines if line)
+
+    @staticmethod
+    def state_color(state):
+        state = str(state or "").upper()
+        if state in {
+            "MANAGER_VERIFYING",
+            "OPENING_LID_FOR_LOADING",
+            "WAITING_FOR_MANAGER_LOAD",
+            "SETTING_HOME",
+            "CLOSING_LID_AFTER_LOADING",
+        }:
+            return "#FFB347"
+        if state.startswith("NAVIGATING") or state == "RETURNING_HOME":
+            return "#5AB9FF"
+        if state.startswith("HANDLING") or state in {
+            "USER_VERIFYING",
+            "OPENING_LID_FOR_USER",
+            "WAITING_FOR_USER_RECEIPT",
+            "CLOSING_LID_AFTER_USER",
+            "NO_REQUEST_HOLDING_3S",
+        }:
+            return "#C792EA"
+        if state == "COMPLETE":
+            return "#90EE90"
+        if state in {"ABORTING", "ABORTED", "FAULTED"}:
+            return "#FF6B6B"
+        return "#FFD166"
 
     def apply_mission_event(self, event):
         key = (
